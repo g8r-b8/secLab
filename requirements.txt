@@ -1,0 +1,16 @@
+arch>=8.0
+duckdb>=1.5
+fastapi>=0.136
+httpx>=0.28
+httpxthrottlecache>=0.3
+numpy>=2.0
+pandas>=2.2
+polars>=1.30
+pyarrow>=17.0
+pydantic>=2.10
+python-dotenv>=1.0
+scipy>=1.14
+starlette>=0.46
+statsmodels>=0.14
+uvicorn>=0.30
+yfinance>=1.3
