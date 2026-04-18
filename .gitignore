@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+
+.venv/
+.env
+.cache/
+seclab.duckdb
+seclab.duckdb.wal
+
+web/node_modules/
+web/.svelte-kit/
+web/build/
+
+.DS_Store
+
+# Claude Code session state
+.claude/
+/tmp/
+
+# OS / editor
+.ipynb_checkpoints/
