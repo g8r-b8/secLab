@@ -14,6 +14,253 @@ BOOTSTRAP_SAMPLES = 1000
 BOOTSTRAP_SEED = 42
 
 
+# ─── Advanced Sharpe corrections + regime + structure metrics ────────────────
+
+def _hac_sharpe(returns: list[float], lag: int | None = None) -> dict[str, float]:
+    """Newey-West HAC-adjusted annualized Sharpe.
+
+    Classical Sharpe assumes IID returns. Event-driven strategies typically
+    show positive autocorrelation → overstated Sharpe. This correction widens
+    the effective variance by accounting for autocorrelations up to `lag`.
+
+    lag defaults to the Andrews rule-of-thumb floor(4*(n/100)^(2/9)).
+    """
+    n = len(returns)
+    if n < 30:
+        return {"hac_sharpe": 0.0, "lag": 0, "adjustment": 1.0}
+    if lag is None:
+        lag = max(1, int(math.floor(4 * (n / 100.0) ** (2.0 / 9.0))))
+    mean = sum(returns) / n
+    # sample variance
+    gamma0 = sum((r - mean) ** 2 for r in returns) / n
+    # weighted autocovariances (Bartlett kernel)
+    hac_var = gamma0
+    for k in range(1, min(lag, n - 1) + 1):
+        w = 1.0 - k / (lag + 1)
+        cov = sum((returns[t] - mean) * (returns[t - k] - mean) for t in range(k, n)) / n
+        hac_var += 2 * w * cov
+    hac_var = max(hac_var, 1e-12)
+    hac_std = math.sqrt(hac_var)
+    # Normal (IID) variance for reference
+    iid_std = math.sqrt(max(gamma0, 1e-12))
+    return {
+        "hac_sharpe": (mean / hac_std) * math.sqrt(TRADING_DAYS),
+        "iid_sharpe": (mean / iid_std) * math.sqrt(TRADING_DAYS),
+        "lag": lag,
+        "adjustment": iid_std / hac_std if hac_std > 0 else 1.0,
+    }
+
+
+def _hurst_exponent(returns: list[float], max_lag: int = 60) -> dict[str, float]:
+    """Hurst exponent via R/S (rescaled range) analysis.
+
+    H ≈ 0.5 → random walk, H > 0.5 → trending/persistent,
+    H < 0.5 → mean-reverting. Informs exit-rule design: momentum strategies
+    prefer persistent series; mean-reversion strategies prefer H < 0.5.
+    """
+    n = len(returns)
+    if n < 30:
+        return {"hurst": 0.5, "n": n, "classification": "insufficient"}
+    lags = list(range(2, min(max_lag, n // 2) + 1))
+    if not lags:
+        return {"hurst": 0.5, "n": n, "classification": "insufficient"}
+
+    # Compute the range of the partial sum series divided by std for each lag
+    series = [sum(returns[: i + 1]) for i in range(n)]  # cumulative
+    log_lags: list[float] = []
+    log_rs: list[float] = []
+    for lag in lags:
+        chunks = n // lag
+        if chunks < 1:
+            continue
+        rs_vals: list[float] = []
+        for c in range(chunks):
+            chunk = returns[c * lag : (c + 1) * lag]
+            m = sum(chunk) / lag
+            mean_adj = [r - m for r in chunk]
+            cum = []
+            s = 0.0
+            for x in mean_adj:
+                s += x
+                cum.append(s)
+            R = max(cum) - min(cum)
+            var = sum((r - m) ** 2 for r in chunk) / lag
+            S = math.sqrt(var) if var > 0 else 0.0
+            if S > 0 and R > 0:
+                rs_vals.append(R / S)
+        if rs_vals:
+            avg_rs = sum(rs_vals) / len(rs_vals)
+            if avg_rs > 0:
+                log_lags.append(math.log(lag))
+                log_rs.append(math.log(avg_rs))
+
+    if len(log_lags) < 3:
+        return {"hurst": 0.5, "n": n, "classification": "insufficient"}
+
+    # Linear regression slope = Hurst exponent
+    k = len(log_lags)
+    mean_x = sum(log_lags) / k
+    mean_y = sum(log_rs) / k
+    num = sum((log_lags[i] - mean_x) * (log_rs[i] - mean_y) for i in range(k))
+    den = sum((log_lags[i] - mean_x) ** 2 for i in range(k))
+    h = num / den if den > 0 else 0.5
+    if h > 0.55:
+        cls = "trending"
+    elif h < 0.45:
+        cls = "mean-reverting"
+    else:
+        cls = "random-walk"
+    return {"hurst": h, "n": n, "classification": cls, "n_lags": k}
+
+
+def _deflated_sharpe(
+    sharpe: float, n_obs: int, n_trials: int = 1,
+    skew: float = 0.0, excess_kurt: float = 0.0,
+) -> dict[str, float]:
+    """Deflated Sharpe Ratio (Bailey & López de Prado, 2014).
+
+    Corrects a realized Sharpe for:
+      - selection bias from N trials (we sweep many combos and pick the top)
+      - skew / kurtosis of the return distribution (non-Normal penalty)
+
+    Returns:
+      expected_max_sharpe_h0  — E[max Sharpe | no skill, N trials]
+      dsr_z                   — z-score of realized vs expected-max
+      dsr_prob                — Φ(dsr_z); > 0.95 means the realized Sharpe
+                                survives the N-trial selection bias.
+    """
+    if n_obs < 30 or n_trials < 1:
+        return {"expected_max_sharpe_h0": 0.0, "dsr_z": 0.0, "dsr_prob": 0.5}
+    # E[max of N standard normals] ≈ √(2 ln N) - (γ + ln ln N) / √(2 ln N)
+    # (gamma ≈ 0.5772 Euler-Mascheroni)
+    gamma_em = 0.5772156649
+    if n_trials == 1:
+        e_max = 0.0
+    else:
+        ln_n = math.log(max(n_trials, 1))
+        e_max = (
+            math.sqrt(2 * ln_n)
+            - (gamma_em + math.log(max(ln_n, 1e-9))) / max(math.sqrt(2 * ln_n), 1e-9)
+        )
+    # Expected max Sharpe under null = e_max * (1 / sqrt(T))
+    # where T is the sample length — annualized scale.
+    # We work in annualized units consistently.
+    sqrt_t = math.sqrt(max(n_obs, 1) / TRADING_DAYS)
+    expected_max = e_max / max(sqrt_t, 1e-9)
+    # Effective Sharpe std accounting for non-Normal tails
+    # Var(SR_hat) ≈ (1 - γ3*SR + (γ4-1)/4 * SR^2) / (T-1)
+    var_sr = (
+        1.0
+        - skew * sharpe
+        + ((excess_kurt) / 4.0) * sharpe * sharpe
+    ) / max(n_obs - 1, 1)
+    std_sr = math.sqrt(max(var_sr, 1e-12))
+    z = (sharpe - expected_max) / max(std_sr * math.sqrt(TRADING_DAYS), 1e-9)
+    # Phi(z) — Normal CDF via erf
+    prob = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+    return {
+        "expected_max_sharpe_h0": float(expected_max),
+        "dsr_z": float(z),
+        "dsr_prob": float(prob),
+        "n_trials": int(n_trials),
+    }
+
+
+def _regime_sharpe(
+    returns: list[float], benchmark_returns: list[float]
+) -> dict[str, Any]:
+    """Split returns by SPY regime via a simple 200-day SMA rule.
+
+    Regimes: uptrend (SPY > its 200d SMA), downtrend (SPY < 200d SMA).
+    Reports sample size + Sharpe per regime so you see if alpha is
+    regime-conditional.
+    """
+    n = min(len(returns), len(benchmark_returns))
+    if n < 220:
+        return {"insufficient": True, "n": n}
+    # Build cumulative SPY equity from returns, then 200d SMA.
+    eq = [1.0]
+    for r in benchmark_returns[:n]:
+        eq.append(eq[-1] * (1 + r))
+    window = 200
+    up: list[float] = []
+    down: list[float] = []
+    for i in range(window, n):
+        sma = sum(eq[i - window + 1 : i + 1]) / window
+        if eq[i] >= sma:
+            up.append(returns[i])
+        else:
+            down.append(returns[i])
+    return {
+        "uptrend_n": len(up),
+        "uptrend_sharpe": _sharpe(up),
+        "uptrend_mean_return_pct": (sum(up) / len(up)) if up else 0.0,
+        "downtrend_n": len(down),
+        "downtrend_sharpe": _sharpe(down),
+        "downtrend_mean_return_pct": (sum(down) / len(down)) if down else 0.0,
+    }
+
+
+def compute_beta_hedge(
+    strategy_returns: list[float],
+    benchmark_returns: list[float],
+    beta: float | None = None,
+) -> dict[str, Any]:
+    """Post-hoc apply a SPY hedge: hedged_r = strategy_r - β × benchmark_r.
+
+    If `beta` is None, estimate it via OLS on the same series. Returns the
+    hedged return series + summary stats so the UI can compare the unhedged
+    long-only view to the market-neutral alpha extract.
+    """
+    n = min(len(strategy_returns), len(benchmark_returns))
+    if n < 20:
+        return {"beta_used": beta or 0.0, "n": n, "insufficient_data": True}
+
+    sr = strategy_returns[:n]
+    br = benchmark_returns[:n]
+
+    if beta is None:
+        s_mean = sum(sr) / n
+        b_mean = sum(br) / n
+        cov = sum((sr[i] - s_mean) * (br[i] - b_mean) for i in range(n)) / max(1, n - 1)
+        var_b = sum((br[i] - b_mean) ** 2 for i in range(n)) / max(1, n - 1)
+        beta = cov / var_b if var_b > 0 else 0.0
+
+    hedged = [sr[i] - beta * br[i] for i in range(n)]
+    # Cumulative product to get equity curve
+    eq = 1.0
+    cum: list[float] = []
+    for r in hedged:
+        eq *= (1 + r)
+        cum.append(eq)
+
+    # Drawdown on hedged equity
+    peak = cum[0] if cum else 1.0
+    max_dd = 0.0
+    for v in cum:
+        peak = max(peak, v)
+        dd = (v - peak) / peak if peak > 0 else 0.0
+        if dd < max_dd:
+            max_dd = dd
+
+    # Running unhedged equity for comparison
+    s_eq = 1.0
+    s_cum: list[float] = []
+    for r in sr:
+        s_eq *= (1 + r)
+        s_cum.append(s_eq)
+
+    return {
+        "beta_used": float(beta),
+        "n": n,
+        "hedged_sharpe": _sharpe(hedged),
+        "hedged_total_return_pct": (cum[-1] - 1) if cum else 0.0,
+        "hedged_max_drawdown_pct": max_dd,
+        "hedged_curve": cum,
+        "unhedged_curve": s_cum,
+    }
+
+
 def _sharpe(returns: list[float]) -> float:
     """Annualized Sharpe from a list of daily returns."""
     n = len(returns)
@@ -252,6 +499,19 @@ def summarise(
         out["var_95"] = _value_at_risk(rets, confidence=0.95)
         out["var_99"] = _value_at_risk(rets, confidence=0.99)
 
+        # HAC / Newey-West adjusted Sharpe (corrects for autocorrelation)
+        out["hac_sharpe"] = _hac_sharpe(rets)
+        # Hurst exponent — trending / mean-reverting classification
+        out["hurst"] = _hurst_exponent(rets)
+        # Deflated Sharpe — requires caller to pass n_trials for sweep results,
+        # so default n_trials=1 here and let sweep.py override per config.
+        var95 = out["var_95"]
+        out["deflated_sharpe"] = _deflated_sharpe(
+            out.get("sharpe", 0.0), n_obs=len(rets), n_trials=1,
+            skew=var95.get("skewness", 0.0),
+            excess_kurt=var95.get("excess_kurtosis", 0.0),
+        )
+
         # Max drawdown + underwater curve + underwater DURATION
         # "Underwater" = below all-time running peak. Track the longest
         # continuous stretch and whether we end underwater.
@@ -366,6 +626,8 @@ def summarise(
                     if a_std > 0:
                         out["information_ratio"] = (a_mean / a_std) * math.sqrt(TRADING_DAYS)
                         out["tracking_error_ann"] = a_std * math.sqrt(TRADING_DAYS)
+                # Regime-conditional Sharpe (uptrend vs downtrend via SPY 200d SMA)
+                out["regime_sharpe"] = _regime_sharpe(rets, b_rets)
         out["alpha_vs_benchmark_pct"] = out["total_return_pct"] - out["benchmark"]["total_return_pct"]
 
     return out

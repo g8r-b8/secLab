@@ -112,7 +112,7 @@
 		const sellColor = signal === 'sells';
 		return {
 			labels: chartRows.map((r) => {
-				const star = r['C-suite'] === '✓' ? ' ★' : '';
+				const star = r['C-suite'] === 'Y' ? ' *' : '';
 				const cluster = peopleCount(r) >= 2 ? ' ●●' : '';
 				return `${r.ticker}${star}${cluster}`;
 			}),
@@ -167,7 +167,7 @@
 	};
 </script>
 
-<h1>{signal === 'buys' ? '📈 Insider Buying' : '📉 Planned Insider Sales'}</h1>
+<h1>{signal === 'buys' ? 'Insider Buying' : 'Planned Insider Sales'}</h1>
 <p class="subtitle">
 	{signal === 'buys'
 		? 'SEC Form 4 open-market purchases (code P), ranked by ticker.'
@@ -330,7 +330,7 @@
 	<div class="modal" role="dialog" aria-modal="true" aria-label="{selectedTicker} insider impact">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— insider impact · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">×</button>
 		</header>
 		<div class="modal-body">
 			<PriceImpactChart ticker={selectedTicker} {start} {end} />

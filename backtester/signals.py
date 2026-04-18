@@ -603,7 +603,7 @@ PRESETS = {
     "form3":         {"label": "Form 3 new-insider onboarding", "fn": form3_long},
     "delistings":    {"label": "Form 15 / 25 delistings (short)", "fn": delistings_short},
     "auditor_changes": {"label": "8-K Item 4.01 auditor changes (short — red flag)", "fn": auditor_changes_short},
-    "piotroski_long": {"label": "Piotroski top-decile quality + Magic Formula (quarterly rebalance, ⚠ uses current snapshot)", "fn": piotroski_long},
+    "piotroski_long": {"label": "Piotroski top-decile quality + Magic Formula (quarterly rebalance, Note: uses current snapshot)", "fn": piotroski_long},
     # Stacked / combined signals — intersections of two sources
     "stacked_cluster_13d":    {"label": "STACK: cluster buys ∩ 13D (±10d)",    "fn": cluster_buys_plus_13d},
     "stacked_cluster_csuite": {"label": "STACK: cluster buys ∩ C-suite (±3d)", "fn": cluster_buys_plus_csuite},

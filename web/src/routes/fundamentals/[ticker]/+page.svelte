@@ -215,10 +215,10 @@
 
 <section class="tabs">
 	<button class:active={tab === 'fundamentals'} onclick={() => (tab = 'fundamentals')}>
-		📊 Fundamentals
+		Fundamentals
 	</button>
 	<button class:active={tab === 'activity'} onclick={() => (tab = 'activity')}>
-		📋 SEC Activity
+		SEC Activity
 		{#if dossier}
 			<span class="badge">{Object.values(dossier.summary).reduce((a, b) => a + b, 0)}</span>
 		{/if}
@@ -242,8 +242,7 @@
 		return `${v.toFixed(0)}`;
 	}}
 	<section class="panel ratios-panel">
-		<h2>
-			Key ratios
+		<h2>Key ratios
 			<span class="panel-sub">
 				— derived from {ratios.period} 10-K
 				{#if ratios.prior_period}· YoY vs {ratios.prior_period}{/if}
@@ -391,7 +390,7 @@
 
 		{#if dossier.superinvestor_holders.length}
 			<section class="panel">
-				<h2>🏛 Superinvestors holding {ticker}</h2>
+				<h2>Superinvestors holding {ticker}</h2>
 				<div class="table-wrap">
 					<table>
 						<thead><tr><th>Fund</th><th class="num">Value</th><th class="num">Shares</th><th>As of</th></tr></thead>
@@ -412,7 +411,7 @@
 
 		{#if dossier.insider_buys.length}
 			<section class="panel">
-				<h2>🟢 Insider buys (Form 4)</h2>
+				<h2>Insider buys (Form 4)</h2>
 				<div class="table-wrap">
 					<table>
 						<thead><tr><th>Date</th><th>Insider</th><th>Position</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Value</th></tr></thead>
@@ -435,7 +434,7 @@
 
 		{#if dossier.planned_sells.length}
 			<section class="panel">
-				<h2>🔴 Planned sells (Form 144)</h2>
+				<h2>Planned sells (Form 144)</h2>
 				<div class="table-wrap">
 					<table>
 						<thead><tr><th>Filed</th><th>Approx sale</th><th>Seller</th><th>Role</th><th class="num">Shares</th><th class="num">$ value</th></tr></thead>
@@ -458,7 +457,7 @@
 
 		{#if dossier.thirteen_d.length || dossier.thirteen_g.length}
 			<section class="panel">
-				<h2>🎯 Activist + passive 5%+ (13D / 13G)</h2>
+				<h2>Activist + passive 5%+ (13D / 13G)</h2>
 				<div class="table-wrap">
 					<table>
 						<thead><tr><th>Date</th><th>Form</th><th>Filer</th></tr></thead>
@@ -478,7 +477,7 @@
 
 		{#if dossier.eight_k.length}
 			<section class="panel">
-				<h2>📰 Material events (8-K)</h2>
+				<h2>Material events (8-K)</h2>
 				<div class="table-wrap">
 					<table>
 						<thead><tr><th>Date</th><th>Items</th></tr></thead>

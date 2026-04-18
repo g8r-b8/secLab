@@ -421,8 +421,7 @@
 {#if selected}
 	<section class="panel">
 		<div class="panel-head">
-			<h2>
-				{selected.name}
+			<h2>{selected.name}
 				<span class="panel-sub">
 					{selected.preset} · started {selected.started_at} · last updated {selected.last_updated ?? 'never'}
 				</span>

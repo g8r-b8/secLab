@@ -259,6 +259,22 @@ def run_sweep(
         )
         all_combos.extend(result.get("combos", []))
 
+    # Deflated Sharpe for each combo, given we tested N = total_combos variants.
+    # Bailey-LdP correction tightens the p-value vs the naive Sharpe CI.
+    from backtester.metrics import _deflated_sharpe as _dsr
+    n_trials = max(1, len(all_combos))
+    for c in all_combos:
+        sr = c.get("sharpe") or 0.0
+        # Best-effort n_obs proxy: 252 trading days per year × years span
+        import datetime as _dt
+        try:
+            days_span = (_dt.date.fromisoformat(end) - _dt.date.fromisoformat(start)).days
+        except Exception:
+            days_span = 756
+        n_obs = int(max(60, days_span * 252 / 365))
+        dsr = _dsr(sr, n_obs=n_obs, n_trials=n_trials)
+        c["dsr"] = dsr
+
     return {
         "presets": per_preset,
         "range": {"start": start, "end": end},
@@ -267,4 +283,5 @@ def run_sweep(
         "combos": all_combos,
         "top_by_sharpe": sorted(all_combos, key=lambda c: -(c["sharpe"] or -1e9))[:10],
         "top_by_alpha": sorted(all_combos, key=lambda c: -(c["alpha_vs_benchmark_pct"] or -1e9))[:10],
+        "top_by_dsr": sorted(all_combos, key=lambda c: -(c.get("dsr", {}).get("dsr_prob") or -1.0))[:10],
     }

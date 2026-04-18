@@ -79,6 +79,17 @@ def fit_garch_1_1(
     beta = float(params.get("beta[1]", 0.0))
     persistence = alpha + beta
 
+    # Reject degenerate / non-stationary fits outright instead of returning
+    # half-NaN numbers that blow up the UI.
+    if (
+        not math.isfinite(omega)
+        or not math.isfinite(alpha)
+        or not math.isfinite(beta)
+        or not math.isfinite(persistence)
+    ):
+        log.warning(f"[garch] degenerate fit: omega={omega} alpha={alpha} beta={beta}")
+        return None
+
     # Conditional vol series (arch returns in % daily). Annualize.
     cond_daily = np.asarray(res.conditional_volatility) / 100.0
     cond_ann = cond_daily * math.sqrt(252)

@@ -31,7 +31,19 @@
 				{ href: '/tender-offers', label: 'Tender Offers' },
 				{ href: '/delistings', label: 'Delistings' },
 				{ href: '/form-d', label: 'Private Placements (D)' },
-				{ href: '/foreign-issuers', label: 'Foreign Issuers' }
+				{ href: '/foreign-issuers', label: 'Foreign Issuers' },
+				{ href: '/ipos', label: 'IPOs + Lockups' },
+				{ href: '/mergers', label: 'M&A (proxies)' }
+			]
+		},
+		{
+			heading: 'Flow',
+			items: [
+				{ href: '/dark-pool', label: 'Off-exchange (ATS + non-ATS)' },
+				{ href: '/smart-vs-dumb', label: 'Smart vs dumb money' },
+				{ href: '/short-sale', label: 'Short-sale daily' },
+				{ href: '/short-pressure', label: 'Short pressure (FTD / SHO / SI)' },
+				{ href: '/live', label: 'Live quotes (IEX)' }
 			]
 		},
 		{
@@ -48,6 +60,12 @@
 				{ href: '/backtest/sweep', label: 'Param Sweep' },
 				{ href: '/backtest/walkforward', label: 'Walk-Forward' },
 				{ href: '/paper', label: 'Paper / Forward test' }
+			]
+		},
+		{
+			heading: 'Research',
+			items: [
+				{ href: '/research/halflife', label: 'Half-life compare' }
 			]
 		}
 	];

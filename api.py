@@ -50,7 +50,7 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
         except Exception as e:
-            logger.error(f"✗ {rid} {request.method} {path_q} raised {type(e).__name__}: {e}")
+            logger.error(f"FAIL {rid} {request.method} {path_q} raised {type(e).__name__}: {e}")
             with _inflight_lock:
                 _inflight.pop(rid, None)
             raise
@@ -66,8 +66,10 @@ from backtester.signals import PRESETS
 from backtester.sweep import run_sweep as run_backtest_sweep
 from backtester.walkforward import run_walkforward as run_backtest_walkforward
 from backtester.baseline import run_random_baseline
-from backtester.factors import attribute_returns
+from backtester.factors import attribute_returns, attribute_returns_ff5
 from backtester.garch import fit_garch_1_1
+from backtester.ic import compute_ic
+from backtester.mc import simulate_paths
 from backtester import forward as paper
 from data_store import (
     compute_ratios_snapshot,
@@ -86,6 +88,26 @@ from data_store import (
     ensure_secondaries_window,
     ensure_tender_offers_window,
     ensure_thirteen_d_window,
+    get_dark_pool_latest,
+    get_dark_pool_ticker,
+    get_dark_pool_spikes,
+    get_offexchange_latest,
+    get_offexchange_ticker,
+    get_offexchange_spikes,
+    get_short_sale_latest,
+    get_short_sale_ticker,
+    get_short_sale_spikes,
+    get_smart_vs_dumb,
+    get_smart_vs_dumb_ticker,
+    get_ftd_latest,
+    get_ftd_ticker,
+    get_sho_threshold_latest,
+    get_short_interest_latest,
+    get_short_interest_ticker,
+    get_ipo_pipeline,
+    get_ipo_recent,
+    get_ipo_lockups,
+    get_merger_filings,
     get_13g_filings,
     get_8k_events,
     get_activism_filings,
@@ -113,7 +135,7 @@ from data_store import (
     ticker_to_cik,
 )
 from providers.form_8k import ITEM_LABELS as FORM_8K_ITEM_LABELS, DEFAULT_INTERESTING as FORM_8K_DEFAULT
-from providers import finnhub, prices
+from providers import finnhub, prices, alpaca_live
 
 app = FastAPI(title="secLab API")
 
@@ -157,6 +179,7 @@ def health() -> dict[str, Any]:
         "providers": {
             "finnhub": finnhub.enabled(),
             "tiingo": prices.tiingo_enabled(),
+            "alpaca_live": alpaca_live.enabled(),
         },
     }
 
@@ -403,6 +426,40 @@ def backtest_run(
                 out["garch"] = garch
     except Exception as e:
         logger.warning(f"garch skipped: {e}")
+
+    # FF5 (5-factor) — parallel to FF3 attribution; captures quality / investment
+    try:
+        if _rets_cache and _dates_cache and len(_rets_cache) >= 60:
+            ff5 = attribute_returns_ff5(_dates_cache, _rets_cache)
+            if ff5:
+                out["factor_attribution_ff5"] = ff5
+    except Exception as e:
+        logger.warning(f"ff5 skipped: {e}")
+
+    # Monte Carlo forward-path envelope (bootstrap historical daily returns)
+    try:
+        if _rets_cache and len(_rets_cache) >= 60:
+            mc = simulate_paths(_rets_cache, horizon_days=252, n_paths=1000)
+            if mc and not mc.get("insufficient_data"):
+                out["monte_carlo"] = mc
+    except Exception as e:
+        logger.warning(f"monte carlo skipped: {e}")
+
+    # Beta-hedge view — post-hoc hedge via SPY short: r_hedged = r_strat - β × r_bench.
+    # If FF attribution is present, default β to the market coefficient so the
+    # default view matches "strip out market exposure."
+    try:
+        bc = out.get("benchmark_curve")
+        if _rets_cache and bc and len(bc) >= len(_rets_cache) + 1:
+            bench_rets = [bc[i]["equity"] / bc[i - 1]["equity"] - 1 for i in range(1, len(bc))]
+            ff_beta = None
+            fa = out.get("factor_attribution")
+            if fa and "factors" in fa and "Mkt-RF" in fa["factors"]:
+                ff_beta = fa["factors"]["Mkt-RF"]["beta"]
+            from backtester.metrics import compute_beta_hedge
+            out["beta_hedge"] = compute_beta_hedge(_rets_cache, bench_rets, beta=ff_beta)
+    except Exception as e:
+        logger.warning(f"beta-hedge skipped: {e}")
     out["params"] = {
         "start": start,
         "end": end,
@@ -460,6 +517,422 @@ def backtest_random_baseline(
         slippage_bps=slippage_bps,
         commission_per_trade=commission_per_trade,
     )
+
+
+@app.get("/research/halflife")
+def research_halflife(
+    presets: str = Query(..., description="Comma-separated preset keys"),
+    start: str = Query(...),
+    end: str = Query(...),
+    max_days: int = Query(60, ge=5, le=252),
+) -> dict[str, Any]:
+    """Run half-life study on N presets over the same window. Overlays decay curves."""
+    import datetime as _dt
+    from backtester.core import _fetch_prices
+    from backtester.halflife import compute_halflife
+
+    preset_keys = [p.strip() for p in presets.split(",") if p.strip()]
+    if not preset_keys:
+        raise HTTPException(400, "no presets specified")
+
+    sd = _dt.date.fromisoformat(start) - _dt.timedelta(days=60)
+    ed = _dt.date.fromisoformat(end) + _dt.timedelta(days=max_days + 10)
+
+    out: list[dict[str, Any]] = []
+    for key in preset_keys:
+        cfg = PRESETS.get(key)
+        if not cfg:
+            out.append({"preset": key, "error": f"unknown preset {key}"})
+            continue
+        signals = cfg["fn"](start=start, end=end)
+        if not signals:
+            out.append({"preset": key, "label": cfg["label"], "error": "0 signals"})
+            continue
+        tickers = {s.ticker.upper() for s in signals}
+        prices = _fetch_prices(tickers, sd.isoformat(), ed.isoformat())
+        hl = compute_halflife(signals, prices, max_days=max_days)
+        if not hl:
+            out.append({
+                "preset": key, "label": cfg["label"],
+                "error": "insufficient signals for halflife", "n_signals": len(signals),
+            })
+            continue
+        hl["preset"] = key
+        hl["label"] = cfg["label"]
+        hl["n_signals_total"] = len(signals)
+        out.append(hl)
+    return {"start": start, "end": end, "max_days": max_days, "results": out}
+
+
+@app.get("/signals/dark-pool")
+def dark_pool_latest(top: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+    """Most recent week's top tickers by FINRA ATS (dark pool) volume."""
+    return get_dark_pool_latest(top=top)
+
+
+@app.get("/signals/dark-pool/spikes")
+def dark_pool_spikes(
+    top: int = Query(30, ge=1, le=200),
+    min_shares: int = Query(1_000_000, ge=0),
+) -> dict[str, Any]:
+    """Tickers with most-anomalous latest-week dark-pool shares vs 8-week median."""
+    return get_dark_pool_spikes(top=top, min_shares=min_shares)
+
+
+@app.get("/signals/dark-pool/{ticker}")
+def dark_pool_ticker(ticker: str, weeks: int = Query(52, ge=4, le=260)) -> dict[str, Any]:
+    """Per-ticker weekly time series + ATS breakdown."""
+    return get_dark_pool_ticker(ticker, weeks=weeks)
+
+
+@app.post("/signals/dark-pool/refresh")
+def dark_pool_refresh(
+    start: str | None = Query(None, description="Default: today − weeks × 7"),
+    end: str | None = Query(None, description="Default: today"),
+    weeks: int = Query(12, ge=1, le=52),
+) -> dict[str, Any]:
+    """Pull latest FINRA ATS weekly data. Idempotent — skips cached weeks."""
+    from providers.finra_ats import ensure_dark_pool_window
+    end = end or date.today().isoformat()
+    start = start or (date.today() - timedelta(days=weeks * 7)).isoformat()
+    return ensure_dark_pool_window(start=start, end=end)
+
+
+# ─── Non-ATS (OTC wholesaler / retail-flow) endpoints ────────────────────────
+
+@app.get("/signals/non-ats")
+def non_ats_latest(top: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+    """Most recent week's top tickers by OTC non-ATS (wholesaler) volume."""
+    return get_offexchange_latest(venue_type="non_ats", top=top)
+
+
+@app.get("/signals/non-ats/spikes")
+def non_ats_spikes(
+    top: int = Query(30, ge=1, le=200),
+    min_shares: int = Query(1_000_000, ge=0),
+) -> dict[str, Any]:
+    return get_offexchange_spikes(top=top, min_shares=min_shares, venue_type="non_ats")
+
+
+@app.get("/signals/non-ats/{ticker}")
+def non_ats_ticker(ticker: str, weeks: int = Query(52, ge=4, le=260)) -> dict[str, Any]:
+    return get_offexchange_ticker(ticker, weeks=weeks, venue_type="non_ats")
+
+
+@app.post("/signals/non-ats/refresh")
+def non_ats_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    weeks: int = Query(12, ge=1, le=52),
+) -> dict[str, Any]:
+    from providers.finra_ats import ensure_non_ats_window
+    end = end or date.today().isoformat()
+    start = start or (date.today() - timedelta(days=weeks * 7)).isoformat()
+    return ensure_non_ats_window(start=start, end=end)
+
+
+# ─── FINRA daily short-sale volume ───────────────────────────────────────────
+
+@app.get("/signals/short-sale")
+def short_sale_latest(
+    top: int = Query(50, ge=1, le=500),
+    min_total_volume: int = Query(100_000, ge=0),
+) -> dict[str, Any]:
+    """Latest day's top tickers by short % of total volume."""
+    return get_short_sale_latest(top=top, min_total_volume=min_total_volume)
+
+
+@app.get("/signals/short-sale/spikes")
+def short_sale_spikes(
+    top: int = Query(30, ge=1, le=200),
+    min_total_volume: int = Query(1_000_000, ge=0),
+) -> dict[str, Any]:
+    """Tickers whose latest short % deviates most from trailing 20-day median."""
+    return get_short_sale_spikes(top=top, min_total_volume=min_total_volume)
+
+
+@app.get("/signals/short-sale/{ticker}")
+def short_sale_ticker(
+    ticker: str, days: int = Query(60, ge=5, le=500)
+) -> dict[str, Any]:
+    return get_short_sale_ticker(ticker, days=days)
+
+
+@app.post("/signals/short-sale/refresh")
+def short_sale_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    days: int = Query(20, ge=1, le=500),
+) -> dict[str, Any]:
+    from providers.finra_short import ensure_short_sale_window
+    end_d = end or date.today().isoformat()
+    start_d = start or (date.today() - timedelta(days=days)).isoformat()
+    return ensure_short_sale_window(start=start_d, end=end_d)
+
+
+# ─── Smart vs Dumb money ─────────────────────────────────────────────────────
+
+@app.get("/signals/smart-vs-dumb")
+def smart_vs_dumb_latest(
+    week: str | None = Query(None, description="ISO week-start (Monday). Default: latest available."),
+    top: int = Query(30, ge=5, le=200),
+) -> dict[str, Any]:
+    """Two leaderboards for the latest week common to ATS + non-ATS feeds:
+    `smart` (institutional dark-pool routing dominant) and
+    `dumb` (retail-flow wholesalers dominant), with insider Form 4 context."""
+    return get_smart_vs_dumb(week=week, top=top)
+
+
+@app.get("/signals/smart-vs-dumb/{ticker}")
+def smart_vs_dumb_ticker(
+    ticker: str, weeks: int = Query(26, ge=4, le=260)
+) -> dict[str, Any]:
+    return get_smart_vs_dumb_ticker(ticker, weeks=weeks)
+
+
+# ─── FTDs / Reg SHO / Short interest (short-pressure) ─────────────────────────
+
+@app.get("/signals/ftd")
+def ftd_latest(
+    top: int = Query(50, ge=1, le=500),
+    min_notional: float = Query(1_000_000, ge=0),
+) -> dict[str, Any]:
+    return get_ftd_latest(top=top, min_notional=min_notional)
+
+
+@app.get("/signals/ftd/{ticker}")
+def ftd_ticker(ticker: str, days: int = Query(90, ge=5, le=500)) -> dict[str, Any]:
+    return get_ftd_ticker(ticker, days=days)
+
+
+@app.post("/signals/ftd/refresh")
+def ftd_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    months: int = Query(3, ge=1, le=24),
+) -> dict[str, Any]:
+    from providers.sec_ftd import ensure_ftd_window
+    end_d = end or date.today().isoformat()
+    start_d = start or (date.today() - timedelta(days=months * 31)).isoformat()
+    return ensure_ftd_window(start=start_d, end=end_d)
+
+
+@app.get("/signals/sho-threshold")
+def sho_threshold_latest() -> dict[str, Any]:
+    """FINRA Reg SHO threshold list for the latest available day."""
+    return get_sho_threshold_latest()
+
+
+@app.post("/signals/sho-threshold/refresh")
+def sho_threshold_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    days: int = Query(14, ge=1, le=180),
+) -> dict[str, Any]:
+    from providers.finra_short_meta import ensure_sho_threshold_window
+    end_d = end or date.today().isoformat()
+    start_d = start or (date.today() - timedelta(days=days)).isoformat()
+    return ensure_sho_threshold_window(start=start_d, end=end_d)
+
+
+@app.get("/signals/short-interest")
+def short_interest_latest(
+    top: int = Query(50, ge=1, le=500),
+    min_days_to_cover: float = Query(0, ge=0),
+) -> dict[str, Any]:
+    return get_short_interest_latest(top=top, min_days_to_cover=min_days_to_cover)
+
+
+@app.get("/signals/short-interest/{ticker}")
+def short_interest_ticker(ticker: str, periods: int = Query(26, ge=4, le=260)) -> dict[str, Any]:
+    return get_short_interest_ticker(ticker, periods=periods)
+
+
+@app.post("/signals/short-interest/refresh")
+def short_interest_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    months: int = Query(3, ge=1, le=24),
+) -> dict[str, Any]:
+    from providers.finra_short_meta import ensure_short_interest_window
+    end_d = end or date.today().isoformat()
+    start_d = start or (date.today() - timedelta(days=months * 31)).isoformat()
+    return ensure_short_interest_window(start=start_d, end=end_d)
+
+
+# ─── IPO tracker ─────────────────────────────────────────────────────────────
+
+@app.get("/signals/ipos/pipeline")
+def ipos_pipeline(
+    days: int = Query(60, ge=7, le=365),
+    top: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    return get_ipo_pipeline(days=days, top=top)
+
+
+@app.get("/signals/ipos/recent")
+def ipos_recent(
+    days: int = Query(90, ge=7, le=365),
+    top: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    return get_ipo_recent(days=days, top=top)
+
+
+@app.get("/signals/ipos/lockups")
+def ipos_lockups(
+    window_days: int = Query(90, ge=7, le=365),
+    top: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    return get_ipo_lockups(window_days=window_days, top=top)
+
+
+@app.post("/signals/ipos/refresh")
+def ipos_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    days: int = Query(240, ge=1, le=365, description="Needs ≥180 days to populate lockup calendar."),
+) -> dict[str, Any]:
+    from providers.ipos import ensure_ipo_window
+    end_d = end or date.today().isoformat()
+    start_d = start or (date.today() - timedelta(days=days)).isoformat()
+    return ensure_ipo_window(start=start_d, end=end_d)
+
+
+# ─── M&A / merger proxies ────────────────────────────────────────────────────
+
+@app.get("/backtest/pbo")
+def backtest_pbo(
+    preset: str = Query(..., description="Preset to evaluate"),
+    start: str = Query(...),
+    end: str = Query(...),
+    hold_days: str = Query("5,10,20,40", description="Comma-separated hold_days"),
+    stop_loss_pct: str = Query("0,0.03,0.05,0.08"),
+    profit_target_pct: str = Query("0,0.10,0.15,0.25"),
+    position_mode: str = Query("fixed_usd"),
+) -> dict[str, Any]:
+    """Probability of Backtest Overfitting via CSCV on a hold×stop×target grid.
+
+    Runs a lightweight sweep, aggregates daily returns per combo, then
+    computes PBO: P(IS-best combo has below-median OOS rank).
+    """
+    from backtester.core import Backtest, _fetch_prices
+    from backtester.signals import PRESETS
+    from backtester.pbo import compute_pbo
+    import datetime as _dt
+    import itertools
+
+    preset_cfg = PRESETS.get(preset)
+    if not preset_cfg:
+        raise HTTPException(404, f"unknown preset {preset}")
+
+    holds = [int(x) for x in hold_days.split(",") if x.strip()]
+    stops = [float(x) for x in stop_loss_pct.split(",") if x.strip()]
+    targets = [float(x) for x in profit_target_pct.split(",") if x.strip()]
+    grid = list(itertools.product(holds, stops, targets))
+    if len(grid) < 4:
+        raise HTTPException(400, "grid too small for PBO (need ≥4 combos)")
+
+    signals = preset_cfg["fn"](start=start, end=end)
+    if not signals:
+        raise HTTPException(400, "preset produced zero signals")
+
+    pad = 60
+    sd = (_dt.date.fromisoformat(start) - _dt.timedelta(days=pad)).isoformat()
+    ed = (_dt.date.fromisoformat(end) + _dt.timedelta(days=pad)).isoformat()
+    tickers = {s.ticker for s in signals} | {"SPY"}
+    prices = _fetch_prices(tickers, sd, ed)
+
+    # Run each combo, extract daily returns from equity curve
+    all_returns: list[list[float]] = []  # [days][combos]
+    labels: list[str] = []
+    date_union: list | None = None
+    combo_series: list[tuple[list[str], list[float]]] = []
+
+    for (h, stp, tgt) in grid:
+        bt = Backtest(
+            signals=signals, start=start, end=end, hold_days=h,
+            stop_loss_pct=stp or None, profit_target_pct=tgt or None,
+            position_mode=position_mode if position_mode in ("fixed_usd", "pct_portfolio") else "fixed_usd",
+            benchmark=None, prefetched_prices=prices,
+        )
+        r = bt.run()
+        eq = r.equity_curve
+        if eq.empty:
+            continue
+        dates = [str(d)[:10] for d in eq["date"].tolist()]
+        equity = eq["equity"].astype(float).tolist()
+        if len(equity) < 20:
+            continue
+        rets = [equity[i] / equity[i - 1] - 1 for i in range(1, len(equity))]
+        combo_series.append((dates[1:], rets))
+        labels.append(f"h={h},stop={stp},tgt={tgt}")
+
+    if len(combo_series) < 4:
+        raise HTTPException(400, "not enough successful combos for PBO")
+
+    # Align to common dates
+    common = set(combo_series[0][0])
+    for cs, _ in combo_series[1:]:
+        common &= set(cs)
+    common_sorted = sorted(common)
+    if len(common_sorted) < 60:
+        raise HTTPException(400, f"only {len(common_sorted)} common days — need ≥60")
+
+    # Build matrix[day][combo]
+    matrix: list[list[float]] = []
+    # per-combo dict for O(1) lookup
+    by_combo: list[dict[str, float]] = [dict(zip(ds, rs)) for (ds, rs) in combo_series]
+    for d in common_sorted:
+        row = [bc.get(d, 0.0) for bc in by_combo]
+        matrix.append(row)
+
+    pbo = compute_pbo(matrix, n_groups=min(16, len(common_sorted) // 10))
+    pbo["combos_tested"] = labels
+    pbo["common_days"] = len(common_sorted)
+    return pbo
+
+
+@app.get("/signals/mergers")
+def mergers_list(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    top: int = Query(500, ge=10, le=2000),
+) -> dict[str, Any]:
+    return get_merger_filings(start=start, end=end, top=top)
+
+
+@app.post("/signals/mergers/refresh")
+def mergers_refresh(
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    days: int = Query(120, ge=1, le=365),
+) -> dict[str, Any]:
+    from providers.mergers import ensure_merger_window
+    end_d = end or date.today().isoformat()
+    start_d = start or (date.today() - timedelta(days=days)).isoformat()
+    return ensure_merger_window(start=start_d, end=end_d)
+
+
+# ─── Live IEX quotes via Alpaca ──────────────────────────────────────────────
+
+@app.get("/live/enabled")
+def live_enabled() -> dict[str, Any]:
+    return {"enabled": alpaca_live.enabled()}
+
+
+@app.get("/live/{ticker}")
+def live_ticker(ticker: str) -> dict[str, Any]:
+    """Single-ticker live snapshot: quote + trade + day bar + % change."""
+    return alpaca_live.get_snapshot(ticker)
+
+
+@app.get("/live")
+def live_batch(
+    tickers: str = Query(..., description="Comma-separated ticker list (max 200)"),
+) -> dict[str, Any]:
+    """Batch live snapshots. Returns {ticker: {bid, ask, last, day_change_pct, ...}}."""
+    lst = [t.strip() for t in tickers.split(",") if t.strip()][:200]
+    return alpaca_live.get_snapshots(lst)
 
 
 @app.get("/paper")

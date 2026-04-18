@@ -138,7 +138,7 @@
 	}
 </script>
 
-<h1>🧪 Walk-Forward Validation</h1>
+<h1>Walk-Forward Validation</h1>
 <p class="subtitle">
 	Split a period into N folds. For each adjacent (train, test) pair: sweep the parameter grid on
 	train, take the top configs, then re-run them on test. If the Sharpe 2.74 from the sweep is real,
@@ -231,8 +231,7 @@
 
 	{#each data.iterations as iter, idx}
 		<section class="panel">
-			<h2>
-				Iteration {idx + 1}
+			<h2>Iteration {idx + 1}
 				<span class="panel-sub">
 					train {iter.train_period.start} → {iter.train_period.end}
 					{#if iter.train_period.n_signals}· {iter.train_period.n_signals.toLocaleString()} signals{/if}

@@ -3,7 +3,7 @@
 </script>
 
 <FilingsFeedPage
-	title="🌏 Foreign Issuers (20-F / 6-K)"
+	title="Foreign Issuers (20-F / 6-K)"
 	subtitle="Non-US companies listed as ADRs file 20-F (annual report — like 10-K) and 6-K (current reports — like 8-K). Covers names like BABA, ASML, TSM, SHOP, and thousands of others that our Form 4 / 10-K pipelines miss entirely. 6-K volume is high (~8k/month) so keep the date window narrow."
 	endpoint="/api/signals/foreign-issuers"
 	defaultStartDays={7}

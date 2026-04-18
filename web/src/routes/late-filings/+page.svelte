@@ -76,7 +76,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>🚩 Late Filings (NT 10-K / NT 10-Q)</h1>
+<h1>Late Filings (NT 10-K / NT 10-Q)</h1>
 <p class="subtitle">
 	Companies that couldn't file their 10-K or 10-Q on time. Clean bear signal — empirical studies
 	show these precede negative news (restatements, going-concern, auditor issues) ~60% of the time.
@@ -212,7 +212,7 @@
 	<div class="modal" role="dialog" aria-modal="true" aria-label="{selectedTicker} late-filing impact">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— NT filing window · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">×</button>
 		</header>
 		<div class="modal-body">
 			<PriceImpactChart ticker={selectedTicker} {start} {end} />

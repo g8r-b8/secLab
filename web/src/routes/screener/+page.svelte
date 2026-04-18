@@ -130,7 +130,7 @@
 	};
 </script>
 
-<h1>🔍 Screener</h1>
+<h1>Screener</h1>
 <p class="subtitle">
 	Cross-sectional ratios across every US-listed ticker with a recent 10-K. Compustat-lite.
 	Filter by valuation, profitability, growth, leverage — then click a ticker to dive into its

@@ -78,7 +78,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>🤝 Tender Offers (M&A)</h1>
+<h1>Tender Offers (M&A)</h1>
 <p class="subtitle">
 	Third-party tender offers (<code>SC TO-T</code>), issuer self-tenders/buybacks
 	(<code>SC TO-I</code>), and target recommendations (<code>SC 14D9</code>). Binary M&A events
@@ -177,7 +177,7 @@
 	<div class="modal" role="dialog" aria-modal="true">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— tender window · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)}>✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)}>×</button>
 		</header>
 		<div class="modal-body"><PriceImpactChart ticker={selectedTicker} {start} {end} padDays={60} /></div>
 	</div>

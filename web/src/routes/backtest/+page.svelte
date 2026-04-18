@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
+	import { browser } from '$app/environment';
 	import { Line, Bar } from 'svelte-chartjs';
 	import {
 		Chart as ChartJS,
@@ -31,6 +32,17 @@
 		Filler
 	);
 
+	// chartjs-plugin-zoom pulls in hammerjs which touches `window` at module
+	// load — can't be imported on the SSR server. Defer to onMount.
+	let zoomReady = $state(false);
+	onMount(async () => {
+		if (!browser) return;
+		const { default: zoomPlugin } = await import('chartjs-plugin-zoom');
+		ChartJS.register(zoomPlugin);
+		zoomReady = true;
+	});
+
+
 	type Trade = {
 		ticker: string;
 		signal_date: string;
@@ -45,7 +57,19 @@
 		pnl: number;
 		return_pct: number;
 		label: string;
+		strength?: number;
 	};
+	const EXIT_REASON_DESC: Record<string, string> = {
+		time: 'Held to max hold_days — natural time-based exit',
+		stop: 'Stop-loss triggered (price dropped below entry × (1−stop%))',
+		target: 'Profit target hit (price reached entry × (1+target%))',
+		trailing: 'Trailing stop triggered (price dropped N% from max favorable)'
+	};
+	function daysBetween(a: string, b: string): number {
+		const da = new Date(a).getTime();
+		const db = new Date(b).getTime();
+		return Math.round((db - da) / 86400000);
+	}
 
 	type EquityRow = { date: string; equity: number; cash: number; invested: number };
 	type BenchRow = { date: string; equity: number };
@@ -69,18 +93,34 @@
 	};
 
 	type GarchFit = {
-		coefficients: { mu: number; omega: number; alpha: number; beta: number };
-		persistence: number;
+		coefficients: {
+			mu: number | null;
+			omega: number | null;
+			alpha: number | null;
+			beta: number | null;
+		};
+		persistence: number | null;
 		half_life_days: number | null;
-		unconditional_vol_ann: number;
-		current_conditional_vol_ann: number;
+		unconditional_vol_ann: number | null;
+		current_conditional_vol_ann: number | null;
 		forecast_vol_ann: number | null;
 		forecast_horizon_days: number;
 		conditional_vol: Array<{ date: string; sigma_ann: number }>;
 		n_obs: number;
-		loglik: number;
-		aic: number;
-		bic: number;
+		loglik: number | null;
+		aic: number | null;
+		bic: number | null;
+	};
+
+	type BetaHedge = {
+		beta_used: number;
+		n: number;
+		hedged_sharpe?: number;
+		hedged_total_return_pct?: number;
+		hedged_max_drawdown_pct?: number;
+		hedged_curve?: number[];
+		unhedged_curve?: number[];
+		insufficient_data?: boolean;
 	};
 
 	type BacktestResponse = {
@@ -92,6 +132,7 @@
 		trades: Trade[];
 		factor_attribution?: FactorAttribution | null;
 		garch?: GarchFit | null;
+		beta_hedge?: BetaHedge | null;
 	};
 
 	// Defaults seeded to the best config from a full 36-combo parameter sweep.
@@ -141,6 +182,9 @@
 	let data = $state<BacktestResponse | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
+	let tradeReasonFilter = $state<string | null>(null);
+	let showTradeMarkers = $state(false);
+	let returnMode = $state<'arithmetic' | 'log'>('arithmetic');
 
 	type BaselineIter = {
 		seed: number;
@@ -196,6 +240,36 @@
 		const n = typeof v === 'number' ? v : Number(v);
 		if (!Number.isFinite(n)) return fallback;
 		return Math.max(lo, Math.min(hi, n));
+	}
+
+	// Restore the sweep-champion config: cluster_buys · 2022-01-01 → 2024-12-31
+	// strength_weighted · hold=5 · stop=3% · target=10% · base=2% · cap=3×
+	// Produces Sharpe 3.18 / +302% / alpha +279% on current data.
+	function resetToChampion() {
+		preset = 'cluster_buys';
+		start = '2022-01-01';
+		end = '2024-12-31';
+		holdDays = 5;
+		positionMode = 'strength_weighted';
+		positionSize = 10000;
+		positionPctPct = 2;
+		riskPerTradePct = 1;
+		targetVolPct = 10;
+		targetDeploymentPctPct = 80;
+		strengthScaleCap = 3;
+		maxSignalsPerDay = 0;
+		maxSectorPctPct = 0;
+		benchmark = 'SPY';
+		stopLossPct = 3;
+		profitTargetPct = 10;
+		trailingStopPct = 0;
+		slippageBps = 10;
+		commissionPerTrade = 1;
+		onePositionPerTicker = false;
+		correlationAdjust = false;
+		correlationShrinkagePct = 50;
+		correlationLookback = 60;
+		run();
 	}
 
 	async function run() {
@@ -384,13 +458,23 @@
 		};
 	});
 
+	// Transform an equity ratio v=P_t/P_0 into the user-selected return metric.
+	// Arithmetic: (v-1)*100 ; Log: ln(v)*100 (natural log, percent units so the
+	// y-axis remains readable for small moves; log and arithmetic converge for
+	// small values and diverge for large ones).
+	function toReturn(v: number): number {
+		if (returnMode === 'log') return Math.log(Math.max(v, 1e-9)) * 100;
+		return (v - 1) * 100;
+	}
+
 	const equityChart = $derived.by(() => {
 		if (!data?.equity_curve?.length) return null;
 		const base = data.equity_curve[0].equity || 1;
-		const datasets: Array<{ label: string; data: { x: string; y: number }[]; borderColor: string; backgroundColor: string; borderWidth: number; pointRadius: number; tension: number; fill?: boolean }> = [
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const datasets: any[] = [
 			{
 				label: data.preset.label,
-				data: data.equity_curve.map((r) => ({ x: r.date, y: (r.equity / base - 1) * 100 })),
+				data: data.equity_curve.map((r) => ({ x: r.date, y: toReturn(r.equity / base) })),
 				borderColor: '#60a5fa',
 				backgroundColor: 'rgba(96, 165, 250, 0.12)',
 				borderWidth: 2,
@@ -403,7 +487,7 @@
 			const bbase = data.benchmark_curve[0].equity || 1;
 			datasets.push({
 				label: `Benchmark (${data.params.benchmark})`,
-				data: data.benchmark_curve.map((r) => ({ x: r.date, y: (r.equity / bbase - 1) * 100 })),
+				data: data.benchmark_curve.map((r) => ({ x: r.date, y: toReturn(r.equity / bbase) })),
 				borderColor: '#f59e0b',
 				backgroundColor: 'transparent',
 				borderWidth: 1.5,
@@ -411,6 +495,82 @@
 				tension: 0.1
 			});
 		}
+
+		// Toggleable trade markers: entries (blue ·) + exits colored by reason.
+		// Each marker is an event — not a trend — so we disable lines between
+		// points via `showLine: false` and render as a scatter-on-line dataset.
+		if (showTradeMarkers && data.trades?.length) {
+			const eqByDate = new Map(data.equity_curve.map((r) => [r.date, r.equity]));
+			const yOf = (d: string) => {
+				const eq = eqByDate.get(d);
+				return eq != null ? toReturn(eq / base) : null;
+			};
+
+			type Pt = {
+				x: string;
+				y: number;
+				ticker: string;
+				kind: string;
+				// Per-trade context so tooltip can show THIS trade's sizing
+				// and own return (not the cumulative portfolio %).
+				entry_price: number;
+				exit_price?: number;
+				position_value: number;
+				trade_return?: number; // arithmetic fraction, e.g. +0.03
+			};
+			const entries: Pt[] = [];
+			const targetExits: Pt[] = [];
+			const stopExits: Pt[] = [];
+			const trailingExits: Pt[] = [];
+			const timeExits: Pt[] = [];
+
+			for (const t of data.trades) {
+				const yIn = yOf(t.entry_date);
+				if (yIn != null) {
+					entries.push({
+						x: t.entry_date,
+						y: yIn,
+						ticker: t.ticker,
+						kind: 'entry',
+						entry_price: t.entry_price,
+						position_value: t.position_value
+					});
+				}
+				const yOut = yOf(t.exit_date);
+				if (yOut != null) {
+					const pt: Pt = {
+						x: t.exit_date,
+						y: yOut,
+						ticker: t.ticker,
+						kind: t.exit_reason,
+						entry_price: t.entry_price,
+						exit_price: t.exit_price,
+						position_value: t.position_value,
+						trade_return: t.return_pct
+					};
+					if (t.exit_reason === 'target') targetExits.push(pt);
+					else if (t.exit_reason === 'stop') stopExits.push(pt);
+					else if (t.exit_reason === 'trailing') trailingExits.push(pt);
+					else timeExits.push(pt);
+				}
+			}
+
+			const marker = (label: string, color: string, pts: Pt[], radius = 2) => ({
+				label,
+				data: pts,
+				borderColor: color,
+				backgroundColor: color,
+				pointRadius: radius,
+				pointHoverRadius: radius + 3,
+				showLine: false
+			});
+			if (entries.length) datasets.push(marker(`Entries (${entries.length})`, '#38bdf8', entries, 1.5));
+			if (targetExits.length) datasets.push(marker(`Target (${targetExits.length})`, '#22c55e', targetExits));
+			if (stopExits.length) datasets.push(marker(`Stop (${stopExits.length})`, '#f87171', stopExits));
+			if (trailingExits.length) datasets.push(marker(`Trail (${trailingExits.length})`, '#fb923c', trailingExits));
+			if (timeExits.length) datasets.push(marker(`Time (${timeExits.length})`, '#94a3b8', timeExits));
+		}
+
 		return { datasets };
 	});
 
@@ -423,11 +583,47 @@
 			legend: { labels: { color: '#e2e8f0' } },
 			tooltip: {
 				callbacks: {
-					label: (ctx: { dataset: { label?: string }; parsed: { y: number } }) => {
+					// Tooltip: for trade markers, surface the trade's OWN
+					// entry/exit/sizing instead of the portfolio-cumulative %.
+					label: (ctx: any) => {
+						const raw = ctx.raw as {
+							ticker?: string;
+							kind?: string;
+							entry_price?: number;
+							exit_price?: number;
+							position_value?: number;
+							trade_return?: number;
+						};
 						const v = ctx.parsed.y;
-						return `${ctx.dataset.label}: ${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+						const cum = `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+						if (raw && raw.ticker) {
+							// Marker point
+							const size = raw.position_value ? ` · $${(raw.position_value / 1000).toFixed(1)}k` : '';
+							if (raw.kind === 'entry') {
+								return `${raw.ticker} entry @ $${(raw.entry_price ?? 0).toFixed(2)}${size} (equity ${cum})`;
+							}
+							const tret = raw.trade_return;
+							const tr = tret != null ? `  trade ${tret >= 0 ? '+' : ''}${(tret * 100).toFixed(2)}%` : '';
+							return `${raw.ticker} ${raw.kind} @ $${(raw.exit_price ?? 0).toFixed(2)}${size}${tr}`;
+						}
+						return `${ctx.dataset.label}: ${cum}`;
 					}
 				}
+			},
+			zoom: {
+				pan: { enabled: true, mode: 'x', modifierKey: 'shift' },
+				zoom: {
+					drag: {
+						enabled: true,
+						backgroundColor: 'rgba(96,165,250,0.12)',
+						borderColor: '#60a5fa',
+						borderWidth: 1
+					},
+					wheel: { enabled: true, speed: 0.1 },
+					pinch: { enabled: true },
+					mode: 'x'
+				},
+				limits: { x: { minRange: 1000 * 60 * 60 * 24 * 5 } } // min 5-day zoom window
 			}
 		},
 		scales: {
@@ -447,6 +643,17 @@
 		}
 	};
 
+	// Find the canvas inside a panel and reset its zoom. Scoped lookup so
+	// "reset" only affects the intended chart.
+	function resetZoomIn(containerSelector: string) {
+		const wrap = document.querySelector(containerSelector);
+		const canvas = wrap?.querySelector('canvas') as HTMLCanvasElement | null;
+		if (!canvas) return;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const c = (ChartJS as any).getChart(canvas);
+		if (c && typeof c.resetZoom === 'function') c.resetZoom();
+	}
+
 	const fmtPct = (v: unknown) =>
 		typeof v === 'number' ? `${(v * 100).toFixed(2)}%` : '—';
 	const fmtMoney = (v: unknown) =>
@@ -465,7 +672,7 @@
 	const alpha = $derived((summary as any)?.alpha_vs_benchmark_pct ?? null);
 </script>
 
-<h1>🧪 Backtest <a class="sweep-link" href="/backtest/sweep">→ parameter sweep</a> <a class="sweep-link" href="/backtest/walkforward">→ walk-forward</a></h1>
+<h1>Backtest <a class="sweep-link" href="/backtest/sweep">→ parameter sweep</a> <a class="sweep-link" href="/backtest/walkforward">→ walk-forward</a></h1>
 <p class="subtitle">
 	Plug any SEC-derived signal into a daily-bar event-driven engine. Entry at the
 	next trading day's close, fixed N-day hold, equal-$ position sizing, compared
@@ -610,6 +817,15 @@
 	<button onclick={run} disabled={loading}>
 		{loading ? 'Running…' : 'Run'}
 	</button>
+	<button
+		onclick={resetToChampion}
+		disabled={loading}
+		title="Snap all fields back to the sweep-champion config"
+		type="button"
+		class="reset"
+	>
+		↺ Reset to champion
+	</button>
 </section>
 
 {#if error}
@@ -633,10 +849,41 @@
 			{/if}
 		</div>
 	{:else if nTr === 0}
+		{@const sk = (summary as { skipped_signals?: Record<string, number> }).skipped_signals ?? {}}
+		{@const skList = Object.entries(sk)
+			.filter(([, n]) => (n as number) > 0)
+			.sort(([, a], [, b]) => (b as number) - (a as number))}
 		<div class="warning">
-			{nSig} signal{nSig === 1 ? '' : 's'} found but zero trades opened — likely all skipped for
-			insufficient bars (window ends too close to the signal). Extend End date past the hold
-			period and retry.
+			<strong>{nSig} signals found but zero trades opened.</strong>
+			{#if skList.length > 0}
+				<br />Skip reasons (ranked by count):
+				<ul style="margin:0.5rem 0 0 1rem; padding:0">
+					{#each skList as [reason, n]}
+						<li>
+							<code>{reason}</code>: <strong>{n}</strong> —
+							{#if reason === 'no_prices'}
+								tickers missing from yfinance (usually delisted). Set <code>TIINGO_API_KEY</code> to backfill.
+							{:else if reason === 'no_future_bar'}
+								signal fired on the final bar of the window. Extend <code>End</code> past the hold period.
+							{:else if reason === 'insufficient_bars'}
+								signal fired too close to window end to complete the full hold. Extend <code>End</code>.
+							{:else if reason === 'bad_price'}
+								ticker returned zero or negative price at entry.
+							{:else if reason === 'ticker_already_open'}
+								<code>one_position_per_ticker</code> gated duplicate signals.
+							{:else if reason === 'daily_cap'}
+								<code>max_signals_per_day</code> ranking filtered these out — raise the cap.
+							{:else if reason === 'sector_cap'}
+								<code>max_sector_pct</code> blocked these — already at sector max.
+							{:else if reason === 'too_small'}
+								position was clipped under $100 by cash / sector limits. Lower <code>position %</code> or raise starting cash.
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				No skip counts recorded — check uvicorn logs.
+			{/if}
 		</div>
 	{/if}
 
@@ -771,8 +1018,7 @@
 
 	<section class="panel">
 		<div class="baseline-header">
-			<h2>
-				Baseline test
+			<h2>Baseline test
 				<span class="panel-sub">— permutation null: shuffle ticker↔date pairings, rerun K times</span>
 			</h2>
 			<div class="baseline-controls">
@@ -847,8 +1093,7 @@
 	{#if data.factor_attribution}
 		{@const fa = data.factor_attribution}
 		<section class="panel">
-			<h2>
-				Fama-French factor attribution
+			<h2>Fama-French factor attribution
 				<span class="panel-sub">
 					— OLS of excess daily returns on Mkt-RF · SMB · HML · MOM
 				</span>
@@ -863,7 +1108,7 @@
 					>
 						{(fa.alpha_annualized * 100).toFixed(2)}%
 					</span>
-					<span class="ci">t = {fa.alpha_t.toFixed(2)}{fa.alpha_significant ? ' ✓' : ''}</span>
+					<span class="ci">t = {fa.alpha_t.toFixed(2)}{fa.alpha_significant ? ' Y' : ''}</span>
 				</div>
 				<div class="metric">
 					<span class="metric-label">R²</span>
@@ -912,11 +1157,81 @@
 		</section>
 	{/if}
 
+	{#if data.beta_hedge && !data.beta_hedge.insufficient_data && data.beta_hedge.hedged_curve}
+		{@const bh = data.beta_hedge}
+		{@const dates = data.equity_curve.slice(1).map((r) => r.date)}
+		<section class="panel">
+			<h2>Beta-hedge view
+				<span class="panel-sub">
+					— hedged = strategy − β × SPY · β = {bh.beta_used.toFixed(3)} (from Fama-French Mkt-RF)
+				</span>
+			</h2>
+			<div class="baseline-stats">
+				<div class="metric">
+					<span class="metric-label">Hedged Sharpe</span>
+					<span class="metric-value" class:up={(bh.hedged_sharpe ?? 0) >= 0} class:down={(bh.hedged_sharpe ?? 0) < 0}>
+						{(bh.hedged_sharpe ?? 0).toFixed(3)}
+					</span>
+				</div>
+				<div class="metric">
+					<span class="metric-label">Hedged return</span>
+					<span class="metric-value" class:up={(bh.hedged_total_return_pct ?? 0) >= 0} class:down={(bh.hedged_total_return_pct ?? 0) < 0}>
+						{((bh.hedged_total_return_pct ?? 0) * 100).toFixed(1)}%
+					</span>
+				</div>
+				<div class="metric">
+					<span class="metric-label">Hedged max DD</span>
+					<span class="metric-value down">{((bh.hedged_max_drawdown_pct ?? 0) * 100).toFixed(2)}%</span>
+				</div>
+			</div>
+			<div class="chart">
+				<!-- eslint-disable-next-line @typescript-eslint/no-explicit-any -->
+				<Line
+					data={{
+						datasets: [
+							{
+								label: 'Unhedged equity',
+								data: (bh.unhedged_curve ?? []).map((v, i) => ({
+									x: dates[i],
+									y: (v - 1) * 100
+								})),
+								borderColor: '#60a5fa',
+								backgroundColor: 'transparent',
+								borderWidth: 1.5,
+								pointRadius: 0,
+								tension: 0.1
+							},
+							{
+								label: `Hedged (β=${bh.beta_used.toFixed(2)}) — residual alpha`,
+								data: (bh.hedged_curve ?? []).map((v, i) => ({
+									x: dates[i],
+									y: (v - 1) * 100
+								})),
+								borderColor: '#a78bfa',
+								backgroundColor: 'rgba(167, 139, 250, 0.12)',
+								borderWidth: 2,
+								pointRadius: 0,
+								tension: 0.1,
+								fill: true
+							}
+						]
+					} as any}
+					options={chartOptions as any}
+				/>
+			</div>
+			<p class="panel-sub" style="margin-top:0.5rem">
+				If hedged equity tracks close to unhedged, most of the return was genuine residual α.
+				If the hedged line flattens out significantly below, the strategy was riding β —
+				running a SPY short against the book would have removed that dependence at the cost of
+				the market's own drift.
+			</p>
+		</section>
+	{/if}
+
 	{#if deploymentStats}
 		{@const ds = deploymentStats}
 		<section class="panel">
-			<h2>
-				Capital deployment
+			<h2>Capital deployment
 				<span class="panel-sub">— % of equity invested vs sitting in cash</span>
 			</h2>
 			<div class="baseline-stats">
@@ -967,8 +1282,36 @@
 		</section>
 	{/if}
 
-	<section class="panel">
-		<h2>Equity curve <span class="panel-sub">— % from starting equity</span></h2>
+	<section class="panel" id="panel-equity">
+		<div class="panel-row">
+			<h2>
+				Equity curve
+				<span class="panel-sub">
+					— {returnMode === 'log' ? 'log return' : '% return'} from start · drag to zoom · shift+drag to pan · wheel to zoom
+				</span>
+			</h2>
+			<div class="chart-controls">
+				<label class="chart-toggle" title="Arithmetic: (P/P0 − 1). Log: ln(P/P0). Log compresses big moves so the early period stays readable.">
+					<span>Returns:</span>
+					<select bind:value={returnMode} class="mini-select">
+						<option value="arithmetic">Arithmetic</option>
+						<option value="log">Log</option>
+					</select>
+				</label>
+				<label class="chart-toggle" title="Overlay trade entries + exits colored by reason">
+					<input type="checkbox" bind:checked={showTradeMarkers} />
+					<span>Trade markers</span>
+				</label>
+				<button
+					type="button"
+					class="reset-zoom"
+					onclick={() => resetZoomIn('#panel-equity')}
+					title="Reset zoom to full window"
+				>
+					Reset zoom
+				</button>
+			</div>
+		</div>
 		{#if equityChart}
 			<div class="chart"><Line data={equityChart} options={chartOptions} /></div>
 		{:else}
@@ -1015,42 +1358,131 @@
 		</section>
 	{/if}
 
+	{#if (summary as { halflife?: { curve: Array<{ day: number; mean_cum_return: number; median_cum_return: number; n: number; mean_daily: number }>; peak_day: number; peak_cum_return: number; half_life_days: number | null; n_signals_used: number; n_signals_dropped: number; max_days: number; front_loaded_pct: number | null } }).halflife}
+		{@const hl = (summary as { halflife: { curve: Array<{ day: number; mean_cum_return: number; median_cum_return: number; n: number; mean_daily: number }>; peak_day: number; peak_cum_return: number; half_life_days: number | null; n_signals_used: number; n_signals_dropped: number; max_days: number; front_loaded_pct: number | null } }).halflife}
+		<section class="panel">
+			<h2>Signal half-life
+				<span class="panel-sub">
+					— cross-sectional mean forward return by day-since-entry · {hl.n_signals_used} signals used
+				</span>
+			</h2>
+			<div class="baseline-stats">
+				<div class="metric">
+					<span class="metric-label" title="Day on which the average signal reaches its max cumulative return">Peak day</span>
+					<span class="metric-value">{hl.peak_day}</span>
+					<span class="ci">cum return {(hl.peak_cum_return * 100).toFixed(2)}%</span>
+				</div>
+				<div class="metric">
+					<span class="metric-label" title="Days after peak for the alpha to fall to half of its peak value. Null if curve stays above half-peak through the window.">Half-life</span>
+					<span class="metric-value">
+						{hl.half_life_days != null ? hl.half_life_days.toFixed(1) + 'd' : '>' + hl.max_days + 'd'}
+					</span>
+				</div>
+				{#if hl.front_loaded_pct != null}
+					<div class="metric">
+						<span class="metric-label" title="Day-1 cumulative return as % of peak — high value = front-loaded signal">Front-loading</span>
+						<span class="metric-value">{(hl.front_loaded_pct * 100).toFixed(0)}%</span>
+						<span class="ci">of peak earned day 1</span>
+					</div>
+				{/if}
+			</div>
+			<div class="chart">
+				<!-- eslint-disable-next-line @typescript-eslint/no-explicit-any -->
+				<Line
+					data={{
+						datasets: [
+							{
+								label: 'Mean cumulative return',
+								data: hl.curve.map((r) => ({ x: r.day, y: r.mean_cum_return * 100 })),
+								borderColor: '#22c55e',
+								backgroundColor: 'rgba(34, 197, 94, 0.15)',
+								borderWidth: 2,
+								pointRadius: 0,
+								tension: 0.15,
+								fill: true
+							},
+							{
+								label: 'Median cumulative return',
+								data: hl.curve.map((r) => ({ x: r.day, y: r.median_cum_return * 100 })),
+								borderColor: '#94a3b8',
+								backgroundColor: 'transparent',
+								borderWidth: 1,
+								borderDash: [4, 4],
+								pointRadius: 0,
+								tension: 0.15
+							}
+						]
+					} as any}
+					options={{
+						responsive: true,
+						maintainAspectRatio: false,
+						plugins: { legend: { display: true, labels: { color: '#cbd5e1' } } },
+						scales: {
+							x: {
+								type: 'linear' as const,
+								title: { display: true, text: 'Days since entry', color: '#94a3b8' },
+								ticks: { color: '#94a3b8' },
+								grid: { color: '#1e293b' }
+							},
+							y: {
+								ticks: {
+									color: '#94a3b8',
+									callback: (v: number | string) => `${Number(v).toFixed(2)}%`
+								},
+								grid: { color: '#1e293b' }
+							}
+						}
+					} as any}
+				/>
+			</div>
+			<p class="panel-sub" style="margin-top:0.5rem">
+				{#if hl.peak_day <= 5}
+					Fast-decay signal — peaks within a week. Short holds and tight targets capture most of the edge.
+				{:else if hl.peak_day <= 20}
+					Medium-decay signal — peaks over a few weeks. Current hold of
+					<code>{data.params.hold_days}</code> days {hl.peak_day <= (data.params.hold_days as number) ? 'is reasonable' : 'may be too short — consider extending'}.
+				{:else}
+					Slow-build signal — peaks over months. Extending hold past <code>{hl.peak_day}</code> days may capture additional alpha.
+				{/if}
+			</p>
+		</section>
+	{/if}
+
 	{#if data.garch}
 		{@const g = data.garch}
 		<section class="panel">
-			<h2>
-				GARCH(1,1) conditional volatility
+			<h2>GARCH(1,1) conditional volatility
 				<span class="panel-sub">
-					— σ²_t = ω + α·ε²_{'{t-1}'} + β·σ²_{'{t-1}'} · {g.n_obs} obs · AIC {g.aic.toFixed(1)}
+					— σ²_t = ω + α·ε²_{'{t-1}'} + β·σ²_{'{t-1}'} · {g.n_obs} obs{g.aic != null ? ` · AIC ${g.aic.toFixed(1)}` : ''}
 				</span>
 			</h2>
 			<div class="baseline-stats">
 				<div class="metric">
 					<span class="metric-label" title="α + β — closer to 1 means vol shocks decay slowly">Persistence</span>
-					<span class="metric-value">{g.persistence.toFixed(3)}</span>
+					<span class="metric-value">{g.persistence != null ? g.persistence.toFixed(3) : '—'}</span>
 					{#if g.half_life_days}
 						<span class="ci">half-life {g.half_life_days.toFixed(1)}d</span>
 					{/if}
 				</div>
 				<div class="metric">
 					<span class="metric-label">ω (base var)</span>
-					<span class="metric-value">{g.coefficients.omega.toFixed(4)}</span>
+					<span class="metric-value">{g.coefficients.omega != null ? g.coefficients.omega.toFixed(4) : '—'}</span>
 				</div>
 				<div class="metric">
 					<span class="metric-label">α (shock weight)</span>
-					<span class="metric-value">{g.coefficients.alpha.toFixed(3)}</span>
+					<span class="metric-value">{g.coefficients.alpha != null ? g.coefficients.alpha.toFixed(3) : '—'}</span>
 				</div>
 				<div class="metric">
 					<span class="metric-label">β (prior-vol weight)</span>
-					<span class="metric-value">{g.coefficients.beta.toFixed(3)}</span>
+					<span class="metric-value">{g.coefficients.beta != null ? g.coefficients.beta.toFixed(3) : '—'}</span>
 				</div>
 				<div class="metric">
 					<span class="metric-label">Unconditional σ (ann)</span>
-					<span class="metric-value">{(g.unconditional_vol_ann * 100).toFixed(1)}%</span>
+					<span class="metric-value">{g.unconditional_vol_ann != null ? (g.unconditional_vol_ann * 100).toFixed(1) + '%' : '—'}</span>
 				</div>
 				<div class="metric">
 					<span class="metric-label">Current σ (ann)</span>
-					<span class="metric-value">{(g.current_conditional_vol_ann * 100).toFixed(1)}%</span>
+					<span class="metric-value">{g.current_conditional_vol_ann != null ? (g.current_conditional_vol_ann * 100).toFixed(1) + '%' : '—'}</span>
 				</div>
 				{#if g.forecast_vol_ann != null}
 					<div class="metric">
@@ -1224,8 +1656,7 @@
 		{@const sv = (summary as { survivorship: { n_excluded_signals: number; n_excluded_tickers: number; excluded_tickers: string[]; pct_of_total: number } }).survivorship}
 		{#if sv.n_excluded_signals > 0}
 			<section class="panel survivorship-warning">
-				<h2>
-					Survivorship bias
+				<h2>Survivorship bias
 					<span class="panel-sub">
 						— {sv.n_excluded_signals} signals on {sv.n_excluded_tickers} tickers excluded because yfinance has no price data
 					</span>
@@ -1281,7 +1712,28 @@
 	{/if}
 
 	<section class="panel">
-		<h2>Trades ({data.trades.length})</h2>
+		<h2>Trades ({data.trades.length})
+			<span class="panel-sub">— entries, exits, sizing rationale. Click a reason chip to filter.</span>
+		</h2>
+		<div class="trade-filters">
+			<button
+				class="reason-filter"
+				class:active={tradeReasonFilter === null}
+				onclick={() => (tradeReasonFilter = null)}
+			>
+				all ({data.trades.length})
+			</button>
+			{#each Object.entries((data.summary as { exits_by_reason?: Record<string, number> }).exits_by_reason ?? {}) as [r, n]}
+				<button
+					class="reason-filter reason-{r}"
+					class:active={tradeReasonFilter === r}
+					onclick={() => (tradeReasonFilter = tradeReasonFilter === r ? null : r)}
+					title={EXIT_REASON_DESC[r] ?? r}
+				>
+					{r}: {n}
+				</button>
+			{/each}
+		</div>
 		<div class="table-wrap">
 			<table>
 				<thead>
@@ -1292,22 +1744,32 @@
 						<th class="num">Entry $</th>
 						<th>Exit</th>
 						<th class="num">Exit $</th>
-						<th>Reason</th>
+						<th class="num" title="Calendar days from entry to exit">Held</th>
+						<th title="Exit reason — hover a row for full explanation">Why</th>
+						<th class="num" title="Notional $ opened at entry">Size</th>
+						<th class="num">Shares</th>
+						<th class="num" title="Signal.strength carried into the trade — drives strength_weighted sizing">Str.</th>
 						<th class="num">Return</th>
 						<th class="num">P&L</th>
 						<th>Label</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#each [...data.trades].sort((a, b) => b.return_pct - a.return_pct) as t}
-						<tr>
+					{#each [...data.trades]
+						.filter((t) => tradeReasonFilter === null || t.exit_reason === tradeReasonFilter)
+						.sort((a, b) => b.return_pct - a.return_pct) as t}
+						<tr title={EXIT_REASON_DESC[t.exit_reason] ?? ''}>
 							<td class="ticker">{t.ticker}</td>
 							<td>{t.signal_date}</td>
 							<td>{t.entry_date}</td>
 							<td class="num">${t.entry_price.toFixed(2)}</td>
 							<td>{t.exit_date}</td>
 							<td class="num">${t.exit_price.toFixed(2)}</td>
+							<td class="num">{daysBetween(t.entry_date, t.exit_date)}d</td>
 							<td class="reason reason-{t.exit_reason}">{t.exit_reason}</td>
+							<td class="num">${(t.position_value / 1000).toFixed(1)}k</td>
+							<td class="num">{t.shares.toFixed(t.shares >= 100 ? 0 : 2)}</td>
+							<td class="num">{t.strength != null ? t.strength.toFixed(1) : '—'}</td>
 							<td class="num" class:up={t.return_pct >= 0} class:down={t.return_pct < 0}>
 								{(t.return_pct >= 0 ? '+' : '') + (t.return_pct * 100).toFixed(2)}%
 							</td>
@@ -1383,6 +1845,15 @@
 	.controls button:disabled {
 		background: #475569;
 		cursor: default;
+	}
+	.controls button.reset {
+		background: transparent;
+		border: 1px solid #334155;
+		color: #94a3b8;
+	}
+	.controls button.reset:hover:not(:disabled) {
+		border-color: #60a5fa;
+		color: #e2e8f0;
 	}
 	.controls label.checkbox {
 		flex-direction: row;
@@ -1514,6 +1985,72 @@
 		font-size: 0.8rem;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
+	}
+	.trade-filters {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+		margin-bottom: 0.75rem;
+	}
+	.reason-filter {
+		background: #0f172a;
+		border: 1px solid #334155;
+		padding: 0.3rem 0.8rem;
+		border-radius: 4px;
+		font-size: 0.82rem;
+		cursor: pointer;
+		color: #cbd5e1;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+	.reason-filter:hover {
+		border-color: #475569;
+	}
+	.reason-filter.active {
+		background: #1e293b;
+		border-color: #60a5fa;
+		color: #e2e8f0;
+	}
+	.panel-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 1rem;
+		margin-bottom: 0.5rem;
+	}
+	.chart-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.85rem;
+		color: #94a3b8;
+		cursor: pointer;
+	}
+	.chart-controls {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+	}
+	.reset-zoom {
+		background: transparent;
+		border: 1px solid #334155;
+		color: #94a3b8;
+		padding: 0.3rem 0.7rem;
+		border-radius: 4px;
+		font-size: 0.82rem;
+		cursor: pointer;
+	}
+	.reset-zoom:hover {
+		border-color: #60a5fa;
+		color: #e2e8f0;
+	}
+	.mini-select {
+		background: #1e293b;
+		border: 1px solid #334155;
+		color: #e2e8f0;
+		padding: 0.2rem 0.4rem;
+		border-radius: 3px;
+		font-size: 0.82rem;
 	}
 	.info {
 		background: #1e3a8a;

@@ -89,7 +89,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>🎯 Activism Tracker</h1>
+<h1>Activism Tracker</h1>
 <p class="subtitle">
 	Schedule 13D &amp; 13D/A filings — anyone crossing 5% beneficial ownership with intent to
 	influence management. Academic research documents positive abnormal returns 5-10 days after the
@@ -253,7 +253,7 @@
 	<div class="modal" role="dialog" aria-modal="true" aria-label="{selectedTicker} activism impact">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— 13D window · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">×</button>
 		</header>
 		<div class="modal-body">
 			<PriceImpactChart ticker={selectedTicker} {start} {end} />

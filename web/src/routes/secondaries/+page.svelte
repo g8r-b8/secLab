@@ -81,7 +81,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>💧 Secondary Offerings</h1>
+<h1>Secondary Offerings</h1>
 <p class="subtitle">
 	S-3 shelf registrations (forward-looking inventory) and 424B takedowns (active dilution).
 	Announce-day reactions are typically -3% to -10% for full secondaries, smaller for at-the-market
@@ -185,7 +185,7 @@
 	<div class="modal" role="dialog" aria-modal="true">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— dilution window · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)}>✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)}>×</button>
 		</header>
 		<div class="modal-body"><PriceImpactChart ticker={selectedTicker} {start} {end} padDays={60} /></div>
 	</div>

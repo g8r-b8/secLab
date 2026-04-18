@@ -218,7 +218,7 @@ def _rank(signals: dict[str, TickerSignal], top: int = 25, min_value: float = 0)
             "total_$":     f"${s.total_value:,.0f}",
             "shares":      f"{s.total_shares:,.0f}",
             "# insiders":  s.cluster_score,
-            "C-suite":     "✓" if s.has_c_suite else "",
+            "C-suite":     "Y" if s.has_c_suite else "",
             "positions":   ", ".join(sorted(s.positions))[:60],
         }
         for s in signals.values() if s.total_value >= min_value

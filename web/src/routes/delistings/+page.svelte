@@ -3,7 +3,7 @@
 </script>
 
 <FilingsFeedPage
-	title="🪦 Delistings (Form 15 + Form 25)"
+	title="Delistings (Form 15 + Form 25)"
 	subtitle="Form 15 — certification of termination of registration (the company goes dark). Form 25 — notice of removal from listing / registration under Section 12(b). Rare but unambiguous signal: the company is leaving the public market."
 	endpoint="/api/signals/delistings"
 	defaultStartDays={60}

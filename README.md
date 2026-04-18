@@ -178,7 +178,7 @@ Default on `/backtest` is seeded to the 27-combo sweep champion from
 | **Alpha vs SPY** | **+279%** |
 | **FF annualized α** | **+55.9%** (t=5.14, significant) |
 
-⚠️ The current default reflects a 27.1% survivorship gap — about 2,851
+Note: The current default reflects a 27.1% survivorship gap — about 2,851
 signals on delisted tickers are excluded by yfinance. Set `TIINGO_API_KEY` in
 `.env` to close the gap; the fallback is already wired into `_fetch_prices`.
 

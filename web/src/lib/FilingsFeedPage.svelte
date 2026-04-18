@@ -178,7 +178,7 @@
 	<div class="modal" role="dialog" aria-modal="true">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)}>✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)}>×</button>
 		</header>
 		<div class="modal-body"><PriceImpactChart ticker={selectedTicker} {start} {end} padDays={45} /></div>
 	</div>

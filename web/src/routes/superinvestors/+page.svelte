@@ -120,7 +120,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>🏛 Superinvestors (13F)</h1>
+<h1>Superinvestors (13F)</h1>
 <p class="subtitle">
 	Quarterly holdings for a curated set of brand-name managers (Buffett, Burry, Ackman, Tepper,
 	Druckenmiller, Einhorn, Icahn, Tiger Global, …). New positions and big loads historically produce
@@ -346,7 +346,7 @@
 	<div class="modal" role="dialog" aria-modal="true" aria-label="{selectedTicker} holding detail">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— held by {data?.label}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">×</button>
 		</header>
 		<div class="modal-body">
 			<PriceImpactChart

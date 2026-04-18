@@ -403,6 +403,170 @@ CREATE INDEX IF NOT EXISTS foreign_filings_issuer_cik  ON foreign_filings(issuer
 CREATE TABLE IF NOT EXISTS _delistings_ingested_days (day DATE PRIMARY KEY, ingested_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS _foreign_filings_ingested_days (day DATE PRIMARY KEY, ingested_at TIMESTAMP);
 
+-- ─── Dark-pool weekly volume (FINRA ATS Transparency) ─────────────────────────
+CREATE TABLE IF NOT EXISTS dark_pool_weekly (
+    week_start  DATE NOT NULL,
+    ticker      TEXT NOT NULL,
+    mpid        TEXT NOT NULL,       -- e.g. 'UBSA', 'JPBX', 'SGMT'
+    ats_name    TEXT,                -- 'UBSA UBS ATS'
+    tier        TEXT,                -- 'T1', 'T2'
+    shares      BIGINT,
+    trades      INTEGER,
+    notional    DOUBLE,
+    PRIMARY KEY (week_start, ticker, mpid)
+);
+CREATE INDEX IF NOT EXISTS dark_pool_ticker ON dark_pool_weekly(ticker);
+CREATE INDEX IF NOT EXISTS dark_pool_week   ON dark_pool_weekly(week_start);
+
+CREATE TABLE IF NOT EXISTS _dark_pool_ingested_weeks (
+    week_start DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── OTC Non-ATS weekly volume (wholesaler / retail-flow internalization) ────
+CREATE TABLE IF NOT EXISTS non_ats_weekly (
+    week_start  DATE NOT NULL,
+    ticker      TEXT NOT NULL,
+    mpid        TEXT NOT NULL,       -- e.g. 'CDRG' (Citadel Securities), 'VIRT' (Virtu)
+    ats_name    TEXT,                -- participant name — kept column name parallel to dark_pool
+    tier        TEXT,                -- 'T1', 'T2'
+    shares      BIGINT,
+    trades      INTEGER,
+    notional    DOUBLE,
+    PRIMARY KEY (week_start, ticker, mpid)
+);
+CREATE INDEX IF NOT EXISTS non_ats_ticker ON non_ats_weekly(ticker);
+CREATE INDEX IF NOT EXISTS non_ats_week   ON non_ats_weekly(week_start);
+
+CREATE TABLE IF NOT EXISTS _non_ats_ingested_weeks (
+    week_start DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── FINRA daily short-sale volume (consolidated NMS) ────────────────────────
+-- One row per (date, ticker). Short_volume = short sales reported via FINRA;
+-- total_volume = all FINRA-reported trades. Short % = short/total.
+CREATE TABLE IF NOT EXISTS short_sale_daily (
+    date               DATE   NOT NULL,
+    ticker             TEXT   NOT NULL,
+    short_volume       BIGINT NOT NULL,
+    short_exempt       BIGINT,
+    total_volume       BIGINT NOT NULL,
+    market             TEXT,
+    PRIMARY KEY (date, ticker)
+);
+CREATE INDEX IF NOT EXISTS short_sale_daily_ticker ON short_sale_daily(ticker);
+CREATE INDEX IF NOT EXISTS short_sale_daily_date   ON short_sale_daily(date);
+
+CREATE TABLE IF NOT EXISTS _short_sale_ingested_days (
+    day DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── SEC Fails-to-Deliver (CNS fails) ─────────────────────────────────────────
+-- SEC publishes bi-monthly ZIPs with daily settlement rows. High FTD volume +
+-- tight float = classic squeeze setup precursor.
+CREATE TABLE IF NOT EXISTS fails_to_deliver (
+    settlement_date DATE    NOT NULL,
+    cusip           TEXT    NOT NULL,
+    ticker          TEXT,
+    quantity        BIGINT  NOT NULL,  -- shares failed
+    description     TEXT,
+    price           DOUBLE,
+    PRIMARY KEY (settlement_date, cusip)
+);
+CREATE INDEX IF NOT EXISTS ftd_ticker ON fails_to_deliver(ticker);
+CREATE INDEX IF NOT EXISTS ftd_date   ON fails_to_deliver(settlement_date);
+
+CREATE TABLE IF NOT EXISTS _ftd_ingested_files (
+    file_key TEXT PRIMARY KEY,  -- e.g. '202602a', '202602b'
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── FINRA Reg SHO Threshold Security List ───────────────────────────────────
+-- Tickers on the SHO threshold: persistent failures to deliver. Small list.
+CREATE TABLE IF NOT EXISTS reg_sho_threshold (
+    date     DATE NOT NULL,
+    ticker   TEXT NOT NULL,
+    market   TEXT,
+    issuer   TEXT,
+    cusip    TEXT,
+    PRIMARY KEY (date, ticker)
+);
+CREATE INDEX IF NOT EXISTS sho_threshold_ticker ON reg_sho_threshold(ticker);
+
+CREATE TABLE IF NOT EXISTS _sho_threshold_ingested_days (
+    day DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── FINRA Weekly Short Interest (bi-monthly settlement) ─────────────────────
+CREATE TABLE IF NOT EXISTS short_interest (
+    settlement_date   DATE    NOT NULL,
+    ticker            TEXT    NOT NULL,
+    shares_short      BIGINT,
+    shares_short_prev BIGINT,
+    change_pct        DOUBLE,
+    avg_daily_volume  BIGINT,
+    days_to_cover     DOUBLE,
+    PRIMARY KEY (settlement_date, ticker)
+);
+CREATE INDEX IF NOT EXISTS si_ticker ON short_interest(ticker);
+CREATE INDEX IF NOT EXISTS si_date   ON short_interest(settlement_date);
+
+CREATE TABLE IF NOT EXISTS _short_interest_ingested_dates (
+    settlement_date DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── IPO tracker: S-1 registrations + 424B4 pricing + lockup dates ──────────
+-- S-1 = initial registration for IPO
+-- S-1/A = amendment (indicates progress toward pricing)
+-- 424B4 = final prospectus (published on pricing day; used to date lockup expirations)
+-- 8-A12B/G = exchange listing (often same week as 424B4)
+CREATE TABLE IF NOT EXISTS ipo_filings (
+    accession        TEXT PRIMARY KEY,
+    form             TEXT NOT NULL,
+    filing_date      DATE NOT NULL,
+    issuer_cik       INTEGER,
+    issuer_name      TEXT,
+    issuer_ticker    TEXT,
+    primary_doc      TEXT
+);
+CREATE INDEX IF NOT EXISTS ipo_filings_date ON ipo_filings(filing_date);
+CREATE INDEX IF NOT EXISTS ipo_filings_form ON ipo_filings(form);
+CREATE INDEX IF NOT EXISTS ipo_filings_issuer ON ipo_filings(issuer_cik);
+
+CREATE TABLE IF NOT EXISTS _ipo_ingested_days (
+    day DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── M&A / merger proxies + going-private ────────────────────────────────────
+-- PREM14A = preliminary merger proxy (first public disclosure of the deal)
+-- DEFM14A = definitive merger proxy (shareholder vote date set)
+-- SC 13E-3 = going-private transaction (management buyout / take-private)
+-- DEFA14A = additional proxy materials (often merger-related updates)
+CREATE TABLE IF NOT EXISTS merger_proxies (
+    accession        TEXT PRIMARY KEY,
+    form             TEXT NOT NULL,
+    filing_date      DATE NOT NULL,
+    issuer_cik       INTEGER,
+    issuer_name      TEXT,
+    issuer_ticker    TEXT,
+    filer_cik        INTEGER,
+    filer_name       TEXT,
+    primary_doc      TEXT
+);
+CREATE INDEX IF NOT EXISTS merger_proxies_date ON merger_proxies(filing_date);
+CREATE INDEX IF NOT EXISTS merger_proxies_form ON merger_proxies(form);
+CREATE INDEX IF NOT EXISTS merger_proxies_issuer ON merger_proxies(issuer_cik);
+
+CREATE TABLE IF NOT EXISTS _merger_proxies_ingested_days (
+    day DATE PRIMARY KEY,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ─── Paper / forward-test portfolios ─────────────────────────────────────────
 CREATE SEQUENCE IF NOT EXISTS paper_portfolio_id_seq;
 CREATE TABLE IF NOT EXISTS paper_portfolio (
@@ -751,7 +915,7 @@ def get_insider_purchases(start: str, end: str, top: int = 25, min_value: float 
         if e["total_value"] < min_value:
             continue
         positions_joined = ", ".join(sorted(e["positions"]))[:80]
-        csuite = "✓" if any(k in positions_joined.upper() for k in _C_SUITE_TITLES) else ""
+        csuite = "Y" if any(k in positions_joined.upper() for k in _C_SUITE_TITLES) else ""
         leaderboard.append(
             {
                 "ticker": t,
@@ -773,7 +937,7 @@ def get_insider_purchases(start: str, end: str, top: int = 25, min_value: float 
             "purchase_transactions": len(transactions),
             "total_value": total_value,
             "cluster_tickers": sum(1 for r in leaderboard if r["# insiders"] >= 2),
-            "csuite_tickers": sum(1 for r in leaderboard if r["C-suite"] == "✓"),
+            "csuite_tickers": sum(1 for r in leaderboard if r["C-suite"] == "Y"),
         },
         "leaderboard": leaderboard,
         "transactions": transactions,
@@ -2053,7 +2217,7 @@ def get_planned_sells(start: str, end: str, top: int = 25, min_value: float = 0)
     _c_suite = ("CEO", "CHIEF EXECUTIVE", "CFO", "CHIEF FINANCIAL", "PRESIDENT")
     for _, e in per.items():
         positions_joined = ", ".join(sorted(e["positions"]))[:80]
-        csuite = "✓" if any(k in positions_joined.upper() for k in _c_suite) else ""
+        csuite = "Y" if any(k in positions_joined.upper() for k in _c_suite) else ""
         leaderboard.append(
             {
                 "ticker": e["ticker"] or "(private)",
@@ -2075,7 +2239,7 @@ def get_planned_sells(start: str, end: str, top: int = 25, min_value: float = 0)
             "planned_sale_filings": len(transactions),
             "total_value": total_value,
             "cluster_tickers": sum(1 for r in leaderboard if r["# sellers"] >= 2),
-            "csuite_tickers": sum(1 for r in leaderboard if r["C-suite"] == "✓"),
+            "csuite_tickers": sum(1 for r in leaderboard if r["C-suite"] == "Y"),
         },
         "leaderboard": leaderboard,
         "transactions": transactions,
@@ -3355,6 +3519,1029 @@ def get_8k_events(
         "item_counts": dict(sorted(per_item_counts.items())),
         "filings": filings[:top * 5],  # more rows than leaderboard to populate the feed
         "by_issuer": issuer_leaderboard,
+    }
+
+
+# ─── Off-exchange flow queries (ATS dark pools + non-ATS wholesalers) ────────
+
+_VENUE_TABLES = {
+    "ats": "dark_pool_weekly",
+    "non_ats": "non_ats_weekly",
+}
+
+
+def _venue_table(venue_type: str) -> str:
+    tbl = _VENUE_TABLES.get(venue_type)
+    if not tbl:
+        raise ValueError(f"unknown venue_type {venue_type}")
+    return tbl
+
+
+def get_offexchange_latest(venue_type: str = "ats", top: int = 50) -> dict[str, Any]:
+    """Leaderboard: most recent week, top tickers by total off-exchange volume."""
+    tbl = _venue_table(venue_type)
+    con = connect()
+    try:
+        latest_week = con.execute(
+            f"SELECT MAX(week_start) FROM {tbl}"
+        ).fetchone()
+        if not latest_week or not latest_week[0]:
+            return {"week_start": None, "leaderboard": []}
+        week = latest_week[0]
+        rows = con.execute(
+            f"""
+            SELECT ticker,
+                   SUM(shares)   AS total_shares,
+                   SUM(trades)   AS total_trades,
+                   SUM(notional) AS total_notional,
+                   COUNT(DISTINCT mpid) AS n_ats
+            FROM {tbl}
+            WHERE week_start = ?
+            GROUP BY ticker
+            ORDER BY total_notional DESC NULLS LAST
+            LIMIT ?
+            """,
+            [week, int(top)],
+        ).fetchall()
+        week_totals = con.execute(
+            f"""
+            SELECT COUNT(*) AS n_rows,
+                   SUM(shares) AS shares,
+                   SUM(notional) AS notional,
+                   COUNT(DISTINCT ticker) AS tickers,
+                   COUNT(DISTINCT mpid) AS venues
+            FROM {tbl}
+            WHERE week_start = ?
+            """,
+            [week],
+        ).fetchone()
+    finally:
+        con.close()
+    return {
+        "week_start": week.isoformat() if hasattr(week, "isoformat") else str(week)[:10],
+        "summary": {
+            "rows": int(week_totals[0] or 0),
+            "total_shares": int(week_totals[1] or 0),
+            "total_notional": float(week_totals[2] or 0.0),
+            "unique_tickers": int(week_totals[3] or 0),
+            "venues": int(week_totals[4] or 0),
+        },
+        "leaderboard": [
+            {
+                "ticker": r[0],
+                "shares": int(r[1] or 0),
+                "trades": int(r[2] or 0),
+                "notional": float(r[3] or 0.0),
+                "n_ats": int(r[4] or 0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_offexchange_ticker(
+    ticker: str, weeks: int = 52, venue_type: str = "ats"
+) -> dict[str, Any]:
+    """Per-ticker time series + venue breakdown for the last `weeks` weeks."""
+    tbl = _venue_table(venue_type)
+    con = connect()
+    try:
+        series = con.execute(
+            f"""
+            SELECT week_start,
+                   SUM(shares)   AS shares,
+                   SUM(trades)   AS trades,
+                   SUM(notional) AS notional,
+                   COUNT(DISTINCT mpid) AS n_ats
+            FROM {tbl}
+            WHERE ticker = ?
+            GROUP BY week_start
+            ORDER BY week_start DESC
+            LIMIT ?
+            """,
+            [ticker.upper(), int(weeks)],
+        ).fetchall()
+        by_ats = con.execute(
+            f"""
+            SELECT mpid, ats_name,
+                   SUM(shares) AS shares,
+                   SUM(trades) AS trades,
+                   SUM(notional) AS notional
+            FROM {tbl}
+            WHERE ticker = ?
+              AND week_start >= (
+                  SELECT COALESCE(MAX(week_start), DATE '1900-01-01') - INTERVAL '90 days'
+                  FROM {tbl} WHERE ticker = ?
+              )
+            GROUP BY mpid, ats_name
+            ORDER BY notional DESC NULLS LAST
+            """,
+            [ticker.upper(), ticker.upper()],
+        ).fetchall()
+    finally:
+        con.close()
+    series_rows = [
+        {
+            "week_start": (r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])[:10]),
+            "shares": int(r[1] or 0),
+            "trades": int(r[2] or 0),
+            "notional": float(r[3] or 0.0),
+            "n_ats": int(r[4] or 0),
+        }
+        for r in series
+    ]
+    # Spike = latest week's shares vs trailing 8-week median
+    spike_ratio = None
+    if len(series_rows) >= 8:
+        latest = series_rows[0]["shares"]
+        trailing = sorted(r["shares"] for r in series_rows[1:9])
+        med = trailing[len(trailing) // 2]
+        if med > 0:
+            spike_ratio = latest / med
+    return {
+        "ticker": ticker.upper(),
+        "series": series_rows,
+        "latest_vs_8w_median_ratio": spike_ratio,
+        "by_ats_last_90d": [
+            {
+                "mpid": r[0],
+                "ats_name": r[1],
+                "shares": int(r[2] or 0),
+                "trades": int(r[3] or 0),
+                "notional": float(r[4] or 0.0),
+            }
+            for r in by_ats
+        ],
+    }
+
+
+def get_offexchange_spikes(
+    top: int = 30, min_shares: int = 1_000_000, venue_type: str = "ats"
+) -> dict[str, Any]:
+    """Tickers whose most recent week's off-exchange share count is most abnormal
+    vs the trailing 8-week median. Filters noise by requiring min_shares."""
+    tbl = _venue_table(venue_type)
+    con = connect()
+    try:
+        latest_week = con.execute(
+            f"SELECT MAX(week_start) FROM {tbl}"
+        ).fetchone()
+        if not latest_week or not latest_week[0]:
+            return {"week_start": None, "spikes": []}
+        week = latest_week[0]
+        rows = con.execute(
+            f"""
+            WITH weekly AS (
+                SELECT ticker, week_start, SUM(shares) AS shares
+                FROM {tbl}
+                GROUP BY ticker, week_start
+            ),
+            ranked AS (
+                SELECT
+                    ticker,
+                    week_start,
+                    shares,
+                    ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY week_start DESC) AS r
+                FROM weekly
+            ),
+            latest AS (
+                SELECT ticker, shares AS latest_shares
+                FROM ranked WHERE r = 1 AND week_start = ?
+            ),
+            trailing AS (
+                SELECT ticker, median(shares) AS med_shares
+                FROM ranked
+                WHERE r BETWEEN 2 AND 9
+                GROUP BY ticker
+                HAVING COUNT(*) >= 4
+            )
+            SELECT l.ticker, l.latest_shares, t.med_shares,
+                   (l.latest_shares * 1.0 / NULLIF(t.med_shares, 0)) AS ratio
+            FROM latest l JOIN trailing t USING (ticker)
+            WHERE l.latest_shares >= ?
+              AND t.med_shares > 0
+            ORDER BY ratio DESC NULLS LAST
+            LIMIT ?
+            """,
+            [week, int(min_shares), int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "week_start": week.isoformat() if hasattr(week, "isoformat") else str(week)[:10],
+        "spikes": [
+            {
+                "ticker": r[0],
+                "latest_shares": int(r[1] or 0),
+                "median_8w_shares": int(r[2] or 0),
+                "ratio": float(r[3] or 0.0),
+            }
+            for r in rows
+        ],
+    }
+
+
+# Backwards-compatible wrappers. The generic get_offexchange_* functions are
+# the new canonical API; these aliases keep existing imports working.
+
+def get_dark_pool_latest(top: int = 50) -> dict[str, Any]:
+    return get_offexchange_latest(venue_type="ats", top=top)
+
+
+def get_dark_pool_ticker(ticker: str, weeks: int = 52) -> dict[str, Any]:
+    return get_offexchange_ticker(ticker, weeks=weeks, venue_type="ats")
+
+
+def get_dark_pool_spikes(top: int = 30, min_shares: int = 1_000_000) -> dict[str, Any]:
+    return get_offexchange_spikes(top=top, min_shares=min_shares, venue_type="ats")
+
+
+# ─── Smart vs dumb money (flow divergence) ───────────────────────────────────
+
+def _smart_dumb_query(week: str | None, top: int, direction: str) -> dict[str, Any]:
+    """Internal: run the divergence query for latest week common to both feeds.
+
+    `direction`:
+        'smart' — rank by ATS share desc, insider flow as tiebreaker (institutions accumulating)
+        'dumb'  — rank by non-ATS share desc, insider selling as tiebreaker (retail-heavy +
+                  distribution warning)
+    """
+    con = connect()
+    try:
+        if week is None:
+            # Latest week that has BOTH ats and non-ats data
+            row = con.execute(
+                """
+                SELECT MAX(w) FROM (
+                    SELECT DISTINCT week_start AS w FROM dark_pool_weekly
+                    INTERSECT
+                    SELECT DISTINCT week_start AS w FROM non_ats_weekly
+                )
+                """
+            ).fetchone()
+            if not row or not row[0]:
+                return {"week_start": None, "rows": []}
+            week_dt = row[0]
+        else:
+            week_dt = dt.date.fromisoformat(week)
+
+        order_clause = (
+            "ORDER BY ats_share DESC NULLS LAST, insider_net_usd DESC NULLS LAST"
+            if direction == "smart"
+            else "ORDER BY na_share DESC NULLS LAST, insider_net_usd ASC NULLS LAST"
+        )
+
+        rows = con.execute(
+            f"""
+            WITH dp AS (
+                SELECT ticker,
+                       SUM(shares) AS dp_shares,
+                       SUM(trades) AS dp_trades,
+                       SUM(notional) AS dp_notional
+                FROM dark_pool_weekly
+                WHERE week_start = ?
+                GROUP BY ticker
+            ),
+            na AS (
+                SELECT ticker,
+                       SUM(shares) AS na_shares,
+                       SUM(trades) AS na_trades,
+                       SUM(notional) AS na_notional
+                FROM non_ats_weekly
+                WHERE week_start = ?
+                GROUP BY ticker
+            ),
+            ins AS (
+                SELECT sub.ISSUERTRADINGSYMBOL AS ticker,
+                       SUM(CASE
+                            WHEN tx.TRANS_CODE = 'P' THEN tx.TRANS_SHARES * tx.TRANS_PRICEPERSHARE
+                            WHEN tx.TRANS_CODE = 'S' THEN -tx.TRANS_SHARES * tx.TRANS_PRICEPERSHARE
+                            ELSE 0 END) AS insider_net_usd,
+                       SUM(CASE WHEN tx.TRANS_CODE = 'P' THEN 1 ELSE 0 END) AS n_buys,
+                       SUM(CASE WHEN tx.TRANS_CODE = 'S' THEN 1 ELSE 0 END) AS n_sells
+                FROM insider_nonderiv_trans tx
+                JOIN insider_submission sub USING (ACCESSION_NUMBER)
+                WHERE DATE_TRUNC('week', tx.TRANS_DATE)::DATE = ?
+                  AND sub.ISSUERTRADINGSYMBOL IS NOT NULL
+                  AND tx.TRANS_CODE IN ('P', 'S')
+                GROUP BY 1
+            ),
+            merged AS (
+                SELECT
+                    COALESCE(dp.ticker, na.ticker) AS ticker,
+                    COALESCE(dp.dp_shares, 0) AS dp_shares,
+                    COALESCE(dp.dp_trades, 0) AS dp_trades,
+                    COALESCE(dp.dp_notional, 0) AS dp_notional,
+                    COALESCE(na.na_shares, 0) AS na_shares,
+                    COALESCE(na.na_trades, 0) AS na_trades,
+                    COALESCE(na.na_notional, 0) AS na_notional
+                FROM dp
+                FULL OUTER JOIN na USING (ticker)
+            )
+            SELECT
+                m.ticker,
+                m.dp_shares, m.dp_trades, m.dp_notional,
+                m.na_shares, m.na_trades, m.na_notional,
+                CAST(m.dp_shares AS DOUBLE) / NULLIF(m.dp_shares + m.na_shares, 0) AS ats_share,
+                CAST(m.na_shares AS DOUBLE) / NULLIF(m.dp_shares + m.na_shares, 0) AS na_share,
+                COALESCE(ins.insider_net_usd, 0) AS insider_net_usd,
+                COALESCE(ins.n_buys, 0) AS n_buys,
+                COALESCE(ins.n_sells, 0) AS n_sells
+            FROM merged m
+            LEFT JOIN ins USING (ticker)
+            WHERE (m.dp_shares + m.na_shares) >= 500000
+            {order_clause}
+            LIMIT ?
+            """,
+            [week_dt, week_dt, week_dt, int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+
+    return {
+        "week_start": week_dt.isoformat() if hasattr(week_dt, "isoformat") else str(week_dt)[:10],
+        "direction": direction,
+        "rows": [
+            {
+                "ticker": r[0],
+                "dp_shares": int(r[1] or 0),
+                "dp_trades": int(r[2] or 0),
+                "dp_notional": float(r[3] or 0.0),
+                "na_shares": int(r[4] or 0),
+                "na_trades": int(r[5] or 0),
+                "na_notional": float(r[6] or 0.0),
+                "ats_share": float(r[7] or 0.0),
+                "na_share": float(r[8] or 0.0),
+                "insider_net_usd": float(r[9] or 0.0),
+                "n_buys": int(r[10] or 0),
+                "n_sells": int(r[11] or 0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_smart_vs_dumb(
+    week: str | None = None, top: int = 30
+) -> dict[str, Any]:
+    """Two leaderboards for the latest week with both ATS + non-ATS data:
+    `smart` (ATS-share dominant, ideally with insider buying) and
+    `dumb` (non-ATS / retail-flow dominant, ideally with insider selling)."""
+    smart = _smart_dumb_query(week, top, "smart")
+    dumb = _smart_dumb_query(week, top, "dumb")
+    return {
+        "week_start": smart.get("week_start") or dumb.get("week_start"),
+        "smart": smart.get("rows", []),
+        "dumb": dumb.get("rows", []),
+    }
+
+
+def get_smart_vs_dumb_ticker(ticker: str, weeks: int = 26) -> dict[str, Any]:
+    """Per-ticker weekly time series: ATS shares, non-ATS shares, insider net $."""
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            WITH dp AS (
+                SELECT week_start, SUM(shares) AS dp_shares, SUM(notional) AS dp_notional
+                FROM dark_pool_weekly
+                WHERE ticker = ?
+                GROUP BY week_start
+            ),
+            na AS (
+                SELECT week_start, SUM(shares) AS na_shares, SUM(notional) AS na_notional
+                FROM non_ats_weekly
+                WHERE ticker = ?
+                GROUP BY week_start
+            ),
+            ins AS (
+                SELECT DATE_TRUNC('week', tx.TRANS_DATE)::DATE AS week_start,
+                       SUM(CASE
+                            WHEN tx.TRANS_CODE = 'P' THEN tx.TRANS_SHARES * tx.TRANS_PRICEPERSHARE
+                            WHEN tx.TRANS_CODE = 'S' THEN -tx.TRANS_SHARES * tx.TRANS_PRICEPERSHARE
+                            ELSE 0 END) AS insider_net_usd,
+                       SUM(CASE WHEN tx.TRANS_CODE = 'P' THEN 1 ELSE 0 END) AS n_buys,
+                       SUM(CASE WHEN tx.TRANS_CODE = 'S' THEN 1 ELSE 0 END) AS n_sells
+                FROM insider_nonderiv_trans tx
+                JOIN insider_submission sub USING (ACCESSION_NUMBER)
+                WHERE UPPER(sub.ISSUERTRADINGSYMBOL) = ?
+                  AND tx.TRANS_CODE IN ('P', 'S')
+                GROUP BY 1
+            ),
+            merged AS (
+                SELECT COALESCE(dp.week_start, na.week_start, ins.week_start) AS week_start,
+                       COALESCE(dp.dp_shares, 0) AS dp_shares,
+                       COALESCE(dp.dp_notional, 0) AS dp_notional,
+                       COALESCE(na.na_shares, 0) AS na_shares,
+                       COALESCE(na.na_notional, 0) AS na_notional,
+                       COALESCE(ins.insider_net_usd, 0) AS insider_net_usd,
+                       COALESCE(ins.n_buys, 0) AS n_buys,
+                       COALESCE(ins.n_sells, 0) AS n_sells
+                FROM dp
+                FULL OUTER JOIN na USING (week_start)
+                FULL OUTER JOIN ins USING (week_start)
+            )
+            SELECT week_start, dp_shares, dp_notional, na_shares, na_notional,
+                   insider_net_usd, n_buys, n_sells
+            FROM merged
+            ORDER BY week_start DESC
+            LIMIT ?
+            """,
+            [ticker.upper(), ticker.upper(), ticker.upper(), int(weeks)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "ticker": ticker.upper(),
+        "series": [
+            {
+                "week_start": r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])[:10],
+                "dp_shares": int(r[1] or 0),
+                "dp_notional": float(r[2] or 0.0),
+                "na_shares": int(r[3] or 0),
+                "na_notional": float(r[4] or 0.0),
+                "ats_share": (float(r[1] or 0) / float((r[1] or 0) + (r[3] or 0)))
+                if ((r[1] or 0) + (r[3] or 0)) > 0 else None,
+                "insider_net_usd": float(r[5] or 0.0),
+                "n_buys": int(r[6] or 0),
+                "n_sells": int(r[7] or 0),
+            }
+            for r in rows
+        ],
+    }
+
+
+# ─── Short-sale daily queries ─────────────────────────────────────────────────
+
+def get_short_sale_latest(top: int = 50, min_total_volume: int = 100_000) -> dict[str, Any]:
+    """Latest day's top tickers by short % of total volume."""
+    con = connect()
+    try:
+        latest_day = con.execute("SELECT MAX(date) FROM short_sale_daily").fetchone()
+        if not latest_day or not latest_day[0]:
+            return {"date": None, "leaderboard": []}
+        day = latest_day[0]
+        rows = con.execute(
+            """
+            SELECT ticker, short_volume, total_volume,
+                   (short_volume * 1.0 / NULLIF(total_volume, 0)) AS short_pct
+            FROM short_sale_daily
+            WHERE date = ? AND total_volume >= ?
+            ORDER BY short_pct DESC NULLS LAST
+            LIMIT ?
+            """,
+            [day, int(min_total_volume), int(top)],
+        ).fetchall()
+        totals = con.execute(
+            """
+            SELECT COUNT(*), SUM(total_volume), SUM(short_volume)
+            FROM short_sale_daily WHERE date = ?
+            """,
+            [day],
+        ).fetchone()
+    finally:
+        con.close()
+    return {
+        "date": day.isoformat() if hasattr(day, "isoformat") else str(day)[:10],
+        "summary": {
+            "tickers": int(totals[0] or 0),
+            "total_volume": int(totals[1] or 0),
+            "short_volume": int(totals[2] or 0),
+            "avg_short_pct": (float(totals[2] or 0) / float(totals[1] or 1))
+            if totals[1] else 0.0,
+        },
+        "leaderboard": [
+            {
+                "ticker": r[0],
+                "short_volume": int(r[1] or 0),
+                "total_volume": int(r[2] or 0),
+                "short_pct": float(r[3] or 0.0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_short_sale_ticker(ticker: str, days: int = 60) -> dict[str, Any]:
+    """Per-ticker daily series."""
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            SELECT date, short_volume, short_exempt, total_volume,
+                   (short_volume * 1.0 / NULLIF(total_volume, 0)) AS short_pct
+            FROM short_sale_daily
+            WHERE ticker = ?
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            [ticker.upper(), int(days)],
+        ).fetchall()
+    finally:
+        con.close()
+    series = [
+        {
+            "date": (r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])[:10]),
+            "short_volume": int(r[1] or 0),
+            "short_exempt": int(r[2] or 0),
+            "total_volume": int(r[3] or 0),
+            "short_pct": float(r[4] or 0.0),
+        }
+        for r in rows
+    ]
+    # Spike: latest short_pct vs trailing 20-day median
+    spike = None
+    if len(series) >= 21:
+        latest = series[0]["short_pct"]
+        trailing = sorted(r["short_pct"] for r in series[1:21])
+        med = trailing[len(trailing) // 2]
+        if med > 0:
+            spike = latest / med
+    return {"ticker": ticker.upper(), "series": series, "latest_vs_20d_median_ratio": spike}
+
+
+def get_short_sale_spikes(
+    top: int = 30, min_total_volume: int = 1_000_000
+) -> dict[str, Any]:
+    """Tickers whose latest-day short % is most elevated vs their 20-day median.
+    Filters out low-volume noise via min_total_volume on the latest day."""
+    con = connect()
+    try:
+        latest_day = con.execute("SELECT MAX(date) FROM short_sale_daily").fetchone()
+        if not latest_day or not latest_day[0]:
+            return {"date": None, "spikes": []}
+        day = latest_day[0]
+        rows = con.execute(
+            """
+            WITH ranked AS (
+                SELECT ticker, date, short_volume, total_volume,
+                       (short_volume * 1.0 / NULLIF(total_volume, 0)) AS short_pct,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) AS r
+                FROM short_sale_daily
+            ),
+            latest AS (
+                SELECT ticker, short_pct AS latest_pct, total_volume
+                FROM ranked WHERE r = 1 AND date = ?
+            ),
+            trailing AS (
+                SELECT ticker, median(short_pct) AS med_pct
+                FROM ranked
+                WHERE r BETWEEN 2 AND 21
+                GROUP BY ticker
+                HAVING COUNT(*) >= 10
+            )
+            SELECT l.ticker, l.latest_pct, t.med_pct, l.total_volume,
+                   (l.latest_pct / NULLIF(t.med_pct, 0)) AS ratio
+            FROM latest l JOIN trailing t USING (ticker)
+            WHERE l.total_volume >= ?
+              AND t.med_pct > 0
+            ORDER BY ratio DESC NULLS LAST
+            LIMIT ?
+            """,
+            [day, int(min_total_volume), int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "date": day.isoformat() if hasattr(day, "isoformat") else str(day)[:10],
+        "spikes": [
+            {
+                "ticker": r[0],
+                "latest_short_pct": float(r[1] or 0.0),
+                "median_20d_short_pct": float(r[2] or 0.0),
+                "total_volume": int(r[3] or 0),
+                "ratio": float(r[4] or 0.0),
+            }
+            for r in rows
+        ],
+    }
+
+
+# ─── IPO tracker queries ─────────────────────────────────────────────────────
+
+_S1_FORMS = ("S-1", "S-1/A")
+_PRICING_FORMS = ("424B1", "424B3", "424B4")
+
+
+def get_ipo_pipeline(days: int = 60, top: int = 100) -> dict[str, Any]:
+    """Recent S-1 / S-1/A filers that haven't priced yet.
+
+    Heuristic: for each issuer_cik with an S-1 in the last `days`, check
+    whether a 424B* has landed since the last S-1 or S-1/A. If not,
+    they're in the pipeline.
+    """
+    con = connect()
+    try:
+        cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = con.execute(
+            f"""
+            WITH s1 AS (
+                SELECT issuer_cik, issuer_name, issuer_ticker,
+                       MAX(filing_date) AS last_s1,
+                       SUM(CASE WHEN form = 'S-1/A' THEN 1 ELSE 0 END) AS n_amendments,
+                       MIN(filing_date) AS first_s1
+                FROM ipo_filings
+                WHERE form IN {_S1_FORMS!r}
+                  AND filing_date >= ?
+                  AND issuer_cik IS NOT NULL
+                GROUP BY 1, 2, 3
+            ),
+            priced AS (
+                SELECT issuer_cik, MAX(filing_date) AS last_pricing
+                FROM ipo_filings
+                WHERE form IN {_PRICING_FORMS!r}
+                  AND issuer_cik IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT s1.issuer_cik, s1.issuer_name, s1.issuer_ticker,
+                   s1.first_s1, s1.last_s1, s1.n_amendments,
+                   priced.last_pricing
+            FROM s1
+            LEFT JOIN priced USING (issuer_cik)
+            WHERE priced.last_pricing IS NULL OR priced.last_pricing < s1.last_s1
+            ORDER BY s1.last_s1 DESC
+            LIMIT ?
+            """,
+            [cutoff, int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "window_days": days,
+        "rows": [
+            {
+                "issuer_cik": r[0],
+                "issuer_name": r[1],
+                "issuer_ticker": r[2],
+                "first_s1_date": (r[3].isoformat() if hasattr(r[3], "isoformat") else str(r[3])[:10]) if r[3] else None,
+                "last_s1_date": (r[4].isoformat() if hasattr(r[4], "isoformat") else str(r[4])[:10]) if r[4] else None,
+                "n_amendments": int(r[5] or 0),
+                "last_pricing_date": (r[6].isoformat() if hasattr(r[6], "isoformat") else str(r[6])[:10]) if r[6] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_ipo_recent(days: int = 90, top: int = 100) -> dict[str, Any]:
+    """Recent priced IPOs (424B4 filings) with earliest S-1 date for context."""
+    con = connect()
+    try:
+        cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = con.execute(
+            f"""
+            WITH priced AS (
+                SELECT issuer_cik, issuer_name, issuer_ticker,
+                       MAX(filing_date) AS pricing_date
+                FROM ipo_filings
+                WHERE form IN {_PRICING_FORMS!r}
+                  AND filing_date >= ?
+                  AND issuer_cik IS NOT NULL
+                GROUP BY 1, 2, 3
+            ),
+            s1 AS (
+                SELECT issuer_cik, MIN(filing_date) AS first_s1
+                FROM ipo_filings
+                WHERE form IN {_S1_FORMS!r}
+                  AND issuer_cik IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT p.issuer_cik, p.issuer_name, p.issuer_ticker,
+                   p.pricing_date, s1.first_s1
+            FROM priced p LEFT JOIN s1 USING (issuer_cik)
+            ORDER BY p.pricing_date DESC
+            LIMIT ?
+            """,
+            [cutoff, int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "window_days": days,
+        "rows": [
+            {
+                "issuer_cik": r[0],
+                "issuer_name": r[1],
+                "issuer_ticker": r[2],
+                "pricing_date": r[3].isoformat() if hasattr(r[3], "isoformat") else str(r[3])[:10],
+                "first_s1_date": (r[4].isoformat() if hasattr(r[4], "isoformat") else str(r[4])[:10]) if r[4] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_ipo_lockups(window_days: int = 90, top: int = 200) -> dict[str, Any]:
+    """Upcoming 180-day post-IPO lockup expirations.
+
+    For each issuer_cik with a 424B pricing, lockup_date = pricing + 180d.
+    Returns lockups within [today, today+window_days]."""
+    con = connect()
+    try:
+        today = dt.date.today()
+        end = today + dt.timedelta(days=window_days)
+        rows = con.execute(
+            f"""
+            WITH priced AS (
+                SELECT issuer_cik, issuer_name, issuer_ticker,
+                       MIN(filing_date) AS pricing_date
+                FROM ipo_filings
+                WHERE form IN {_PRICING_FORMS!r}
+                  AND issuer_cik IS NOT NULL
+                GROUP BY 1, 2, 3
+            )
+            SELECT issuer_cik, issuer_name, issuer_ticker, pricing_date,
+                   (pricing_date + INTERVAL '180 days')::DATE AS lockup_date
+            FROM priced
+            WHERE (pricing_date + INTERVAL '180 days')::DATE BETWEEN ? AND ?
+            ORDER BY lockup_date ASC
+            LIMIT ?
+            """,
+            [today, end, int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "window_days": window_days,
+        "from": today.isoformat(),
+        "to": end.isoformat(),
+        "rows": [
+            {
+                "issuer_cik": r[0],
+                "issuer_name": r[1],
+                "issuer_ticker": r[2],
+                "pricing_date": r[3].isoformat() if hasattr(r[3], "isoformat") else str(r[3])[:10],
+                "lockup_date": r[4].isoformat() if hasattr(r[4], "isoformat") else str(r[4])[:10],
+                "days_until": (r[4] - today).days,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ─── M&A / merger proxy queries ──────────────────────────────────────────────
+
+def get_merger_filings(
+    start: str | None = None, end: str | None = None, top: int = 500
+) -> dict[str, Any]:
+    """Recent merger proxies + going-private filings in window.
+
+    Groups by issuer so you can see the PREM → DEFM progression.
+    """
+    con = connect()
+    try:
+        end_d = end or dt.date.today().isoformat()
+        start_d = start or (dt.date.today() - dt.timedelta(days=120)).isoformat()
+
+        rows = con.execute(
+            """
+            SELECT accession, form, filing_date, issuer_cik, issuer_name,
+                   issuer_ticker, filer_cik, filer_name, primary_doc
+            FROM merger_proxies
+            WHERE filing_date BETWEEN ? AND ?
+            ORDER BY filing_date DESC, issuer_name
+            LIMIT ?
+            """,
+            [start_d, end_d, int(top)],
+        ).fetchall()
+
+        # Per-issuer progression (latest state per target)
+        by_issuer = con.execute(
+            """
+            WITH latest AS (
+                SELECT issuer_cik, issuer_name, issuer_ticker,
+                       MAX(filing_date) AS last_filing,
+                       COUNT(*) AS n_filings,
+                       COUNT(CASE WHEN form LIKE 'PREM%' THEN 1 END) AS prem_count,
+                       COUNT(CASE WHEN form LIKE 'DEFM%' THEN 1 END) AS defm_count,
+                       COUNT(CASE WHEN form LIKE 'SC 13E-3%' THEN 1 END) AS going_private_count
+                FROM merger_proxies
+                WHERE filing_date BETWEEN ? AND ?
+                  AND issuer_cik IS NOT NULL
+                GROUP BY 1, 2, 3
+            )
+            SELECT * FROM latest
+            ORDER BY last_filing DESC
+            LIMIT 100
+            """,
+            [start_d, end_d],
+        ).fetchall()
+    finally:
+        con.close()
+
+    return {
+        "range": {"start": start_d, "end": end_d},
+        "summary": {
+            "total_filings": len(rows),
+        },
+        "filings": [
+            {
+                "accession": r[0],
+                "form": r[1],
+                "filing_date": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2])[:10],
+                "issuer_cik": r[3],
+                "issuer_name": r[4],
+                "issuer_ticker": r[5],
+                "filer_cik": r[6],
+                "filer_name": r[7],
+                "primary_doc": r[8],
+            }
+            for r in rows
+        ],
+        "by_issuer": [
+            {
+                "issuer_cik": r[0],
+                "issuer_name": r[1],
+                "issuer_ticker": r[2],
+                "last_filing": r[3].isoformat() if hasattr(r[3], "isoformat") else str(r[3])[:10],
+                "n_filings": int(r[4] or 0),
+                "prem_count": int(r[5] or 0),
+                "defm_count": int(r[6] or 0),
+                "going_private_count": int(r[7] or 0),
+                "status": (
+                    "going private" if (r[7] or 0) > 0 else
+                    "definitive" if (r[6] or 0) > 0 else
+                    "preliminary"
+                ),
+            }
+            for r in by_issuer
+        ],
+    }
+
+
+# ─── Short-pressure queries (FTDs + SHO threshold + short interest) ──────────
+
+def get_ftd_latest(top: int = 50, min_notional: float = 1_000_000) -> dict[str, Any]:
+    """Top tickers by $ fails on the latest settlement date we have."""
+    con = connect()
+    try:
+        row = con.execute(
+            "SELECT MAX(settlement_date) FROM fails_to_deliver"
+        ).fetchone()
+        if not row or not row[0]:
+            return {"date": None, "rows": []}
+        d = row[0]
+        rows = con.execute(
+            """
+            SELECT ticker, description, SUM(quantity) AS shares,
+                   MAX(price) AS price, SUM(quantity * price) AS notional,
+                   COUNT(*) AS n_rows
+            FROM fails_to_deliver
+            WHERE settlement_date = ? AND ticker IS NOT NULL
+            GROUP BY ticker, description
+            HAVING SUM(quantity * price) >= ?
+            ORDER BY notional DESC
+            LIMIT ?
+            """,
+            [d, float(min_notional), int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "date": d.isoformat() if hasattr(d, "isoformat") else str(d)[:10],
+        "rows": [
+            {
+                "ticker": r[0],
+                "description": r[1],
+                "shares": int(r[2] or 0),
+                "price": float(r[3] or 0.0),
+                "notional": float(r[4] or 0.0),
+                "n_rows": int(r[5] or 0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_ftd_ticker(ticker: str, days: int = 90) -> dict[str, Any]:
+    """Per-ticker daily FTD series."""
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            SELECT settlement_date, SUM(quantity) AS shares,
+                   AVG(price) AS price, SUM(quantity * price) AS notional
+            FROM fails_to_deliver
+            WHERE ticker = ?
+            GROUP BY settlement_date
+            ORDER BY settlement_date DESC
+            LIMIT ?
+            """,
+            [ticker.upper(), int(days)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "ticker": ticker.upper(),
+        "series": [
+            {
+                "date": r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])[:10],
+                "shares": int(r[1] or 0),
+                "price": float(r[2] or 0.0),
+                "notional": float(r[3] or 0.0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_sho_threshold_latest() -> dict[str, Any]:
+    """Most recent threshold-list date's tickers."""
+    con = connect()
+    try:
+        row = con.execute("SELECT MAX(date) FROM reg_sho_threshold").fetchone()
+        if not row or not row[0]:
+            return {"date": None, "rows": []}
+        d = row[0]
+        rows = con.execute(
+            """
+            SELECT ticker, market, issuer, cusip
+            FROM reg_sho_threshold
+            WHERE date = ?
+            ORDER BY ticker
+            """,
+            [d],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "date": d.isoformat() if hasattr(d, "isoformat") else str(d)[:10],
+        "rows": [
+            {"ticker": r[0], "market": r[1], "issuer": r[2], "cusip": r[3]}
+            for r in rows
+        ],
+    }
+
+
+def get_short_interest_latest(top: int = 50, min_days_to_cover: float = 0) -> dict[str, Any]:
+    """Top tickers by days-to-cover on the latest settlement date."""
+    con = connect()
+    try:
+        row = con.execute("SELECT MAX(settlement_date) FROM short_interest").fetchone()
+        if not row or not row[0]:
+            return {"settlement_date": None, "rows": []}
+        d = row[0]
+        rows = con.execute(
+            """
+            SELECT ticker, shares_short, shares_short_prev, change_pct,
+                   avg_daily_volume, days_to_cover
+            FROM short_interest
+            WHERE settlement_date = ?
+              AND days_to_cover >= ?
+              AND days_to_cover < 999
+            ORDER BY days_to_cover DESC NULLS LAST
+            LIMIT ?
+            """,
+            [d, float(min_days_to_cover), int(top)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "settlement_date": d.isoformat() if hasattr(d, "isoformat") else str(d)[:10],
+        "rows": [
+            {
+                "ticker": r[0],
+                "shares_short": int(r[1] or 0),
+                "shares_short_prev": int(r[2] or 0),
+                "change_pct": float(r[3] or 0.0),
+                "avg_daily_volume": int(r[4] or 0),
+                "days_to_cover": float(r[5] or 0.0),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_short_interest_ticker(ticker: str, periods: int = 26) -> dict[str, Any]:
+    """Per-ticker bi-monthly short-interest history."""
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            SELECT settlement_date, shares_short, shares_short_prev, change_pct,
+                   avg_daily_volume, days_to_cover
+            FROM short_interest
+            WHERE ticker = ?
+            ORDER BY settlement_date DESC
+            LIMIT ?
+            """,
+            [ticker.upper(), int(periods)],
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        "ticker": ticker.upper(),
+        "series": [
+            {
+                "settlement_date": r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])[:10],
+                "shares_short": int(r[1] or 0),
+                "shares_short_prev": int(r[2] or 0),
+                "change_pct": float(r[3] or 0.0),
+                "avg_daily_volume": int(r[4] or 0),
+                "days_to_cover": float(r[5] or 0.0),
+            }
+            for r in rows
+        ],
     }
 
 

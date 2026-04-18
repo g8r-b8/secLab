@@ -29,6 +29,7 @@ import pandas as pd
 log = logging.getLogger("seclab")
 
 FF3_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip"
+FF5_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
 MOM_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_daily_CSV.zip"
 
 _HEADERS = {
@@ -38,6 +39,7 @@ _HEADERS = {
 
 _CACHE_DIR = Path(__file__).parent.parent / ".cache" / "factors"
 _DF_CACHE: pd.DataFrame | None = None
+_DF_CACHE_FF5: pd.DataFrame | None = None
 
 
 def _ensure_cache() -> Path:
@@ -127,6 +129,33 @@ def load_factors(force_reload: bool = False) -> pd.DataFrame:
     return out
 
 
+def load_factors_ff5(force_reload: bool = False) -> pd.DataFrame:
+    """FF5 = Mkt-RF, SMB, HML, RMW (profitability), CMA (investment), RF, + MOM.
+
+    Same daily series as FF3 but with the Fama-French 5-factor set — adds
+    RMW (Robust-Minus-Weak profitability) and CMA (Conservative-Minus-
+    Aggressive investment) to capture quality-factor tilts that the older
+    3-factor model missed.
+    """
+    global _DF_CACHE_FF5
+    if _DF_CACHE_FF5 is not None and not force_reload:
+        return _DF_CACHE_FF5
+
+    ff5_raw = _download(FF5_URL, "FF5_daily.zip")
+    ff5 = _parse_ff_csv(ff5_raw)
+    ff5.columns = [c.strip() for c in ff5.columns]
+
+    mom_raw = _download(MOM_URL, "Momentum_daily.zip")
+    mom = _parse_ff_csv(mom_raw)
+    mom.columns = [c.strip() for c in mom.columns]
+    rename = {c: "MOM" for c in mom.columns if c.upper() in ("MOM", "UMD")}
+    mom = mom.rename(columns=rename)[["MOM"]]
+
+    out = ff5.join(mom, how="left")
+    _DF_CACHE_FF5 = out
+    return out
+
+
 def _ols(y: np.ndarray, X: np.ndarray) -> dict[str, Any]:
     """Plain OLS with HAC-less classical SEs. X must include constant column."""
     n, k = X.shape
@@ -181,6 +210,69 @@ def attribute_returns(
     # y = excess strategy return (subtract risk-free)
     y = (merged["strategy"] - merged["RF"]).to_numpy()
     factor_cols = ["Mkt-RF", "SMB", "HML", "MOM"]
+    available = [c for c in factor_cols if c in merged.columns and merged[c].notna().all()]
+    X_raw = merged[available].to_numpy()
+    X = np.column_stack([np.ones(len(y)), X_raw])
+    res = _ols(y, X)
+
+    labels = ["alpha"] + available
+    coef = dict(zip(labels, res["beta"]))
+    se = dict(zip(labels, res["se"]))
+    t = dict(zip(labels, res["t"]))
+
+    alpha_daily = float(coef["alpha"])
+    return {
+        "alpha_daily": alpha_daily,
+        "alpha_annualized": (1 + alpha_daily) ** 252 - 1,
+        "alpha_t": float(t["alpha"]),
+        "alpha_se_daily": float(se["alpha"]),
+        "alpha_significant": abs(float(t["alpha"])) > 2.0,
+        "factors": {
+            name: {
+                "beta": float(coef[name]),
+                "se": float(se[name]),
+                "t": float(t[name]),
+                "significant": abs(float(t[name])) > 2.0,
+            }
+            for name in available
+        },
+        "r_squared": float(res["r2"]),
+        "n_obs": int(res["n"]),
+        "residual_std_daily": float(res["resid_std"]),
+        "factor_date_range": {
+            "start": merged.index.min().date().isoformat(),
+            "end": merged.index.max().date().isoformat(),
+        },
+    }
+
+
+def attribute_returns_ff5(
+    dates: list[str],
+    strategy_returns: list[float],
+) -> dict[str, Any] | None:
+    """FF5 + MOM regression (Mkt-RF, SMB, HML, RMW, CMA, MOM).
+
+    Same contract as attribute_returns but uses the 5-factor model plus
+    momentum. RMW = profitability (quality), CMA = investment-style factor.
+    A residual α that was significant under FF3+MOM may shrink under FF5
+    if the strategy was really capturing quality or low-investment effects.
+    """
+    if len(dates) != len(strategy_returns) or len(dates) < 30:
+        return None
+    try:
+        factors = load_factors_ff5()
+    except Exception as e:
+        log.warning(f"[factors FF5] load failed: {e}")
+        return None
+
+    idx = pd.to_datetime(dates)
+    rets = pd.Series(strategy_returns, index=idx, name="strategy").astype(float)
+    merged = rets.to_frame().join(factors, how="inner").dropna()
+    if len(merged) < 30:
+        return None
+
+    y = (merged["strategy"] - merged["RF"]).to_numpy()
+    factor_cols = ["Mkt-RF", "SMB", "HML", "RMW", "CMA", "MOM"]
     available = [c for c in factor_cols if c in merged.columns and merged[c].notna().all()]
     X_raw = merged[available].to_numpy()
     X = np.column_stack([np.ones(len(y)), X_raw])

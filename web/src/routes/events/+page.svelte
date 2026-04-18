@@ -118,7 +118,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>📰 Material Events (8-K)</h1>
+<h1>Material Events (8-K)</h1>
 <p class="subtitle">
 	Every 8-K filing, tagged by SEC item number. Filter to the items that move stocks —
 	restatements (4.02), exec departures (5.02), auditor changes (4.01), bankruptcies (1.03),
@@ -249,7 +249,7 @@
 	<div class="modal" role="dialog" aria-modal="true" aria-label="{selectedTicker} 8-K impact">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— 8-K window · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">×</button>
 		</header>
 		<div class="modal-body">
 			<PriceImpactChart ticker={selectedTicker} {start} {end} />

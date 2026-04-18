@@ -91,6 +91,7 @@ class BacktestResult:
                     "pnl": t.pnl,
                     "return_pct": t.return_pct,
                     "label": t.label,
+                    "strength": float(getattr(t, "strength", 1.0)),
                 }
                 for t in self.trades
             ],
@@ -264,13 +265,14 @@ class Backtest:
     end: str                  # window end (exclusive)
     hold_days: int = 20       # max trading days to hold. Also the time-exit trigger.
     # Position sizing — pick one mode.
-    position_mode: str = "fixed_usd"  # 'fixed_usd', 'pct_portfolio', 'risk_per_trade', 'vol_target', 'strength_weighted', 'target_deployment'
+    position_mode: str = "fixed_usd"  # 'fixed_usd', 'pct_portfolio', 'risk_per_trade', 'vol_target', 'strength_weighted', 'target_deployment', 'kelly'
     position_size: float = 10_000.0   # $ notional per signal (fixed_usd mode)
     position_pct: float = 0.02        # fraction of current equity (pct_portfolio mode; also per-position cap in strength_weighted + target_deployment)
     risk_per_trade_pct: float = 0.01  # $ risked per trade as fraction of equity (risk_per_trade mode; needs stop_loss_pct > 0)
     target_vol_pct: float = 0.10      # per-position annualised volatility target (vol_target mode)
     target_deployment_pct: float = 0.80  # target fraction of equity invested at any time (target_deployment mode)
     strength_scale_cap: float = 3.0   # clamp strength multiplier to [1/cap, cap] so extreme signals don't dominate (strength_weighted mode)
+    kelly_fraction: float = 0.25      # fractional Kelly multiplier (kelly mode). 1.0 = full Kelly (aggressive), 0.25 = quarter-Kelly (standard)
     # Portfolio-level risk controls
     max_signals_per_day: int | None = None   # cap concurrent bets on any given signal date (ranked by strength)
     max_sector_pct: float | None = None      # skip new position if it pushes sector exposure over this fraction
@@ -553,7 +555,7 @@ class Backtest:
             # against current equity unless we're in fixed_usd mode.
             while ti < len(remaining_trades) and remaining_trades[ti].entry_date == d.isoformat():
                 t = remaining_trades[ti]
-                if self.position_mode in ("pct_portfolio", "risk_per_trade", "vol_target", "strength_weighted", "target_deployment"):
+                if self.position_mode in ("pct_portfolio", "risk_per_trade", "vol_target", "strength_weighted", "target_deployment", "kelly"):
                     # Compute current equity at this moment (pre-entry)
                     current_invested = 0.0
                     for op in open_positions:
@@ -599,7 +601,7 @@ class Backtest:
                         cap = max(1.0, float(self.strength_scale_cap or 3.0))
                         ratio = max(1.0 / cap, min(cap, ratio))
                         new_position_value = max(0.0, current_equity * self.position_pct * ratio)
-                    else:  # target_deployment
+                    elif self.position_mode == "target_deployment":
                         # Close the gap to target % invested, but cap per-
                         # position exposure at position_pct × equity so one
                         # signal on a clean book can't hog the whole portfolio.
@@ -607,6 +609,29 @@ class Backtest:
                         gap = max(0.0, target_invested - current_invested)
                         per_position_cap = current_equity * self.position_pct
                         new_position_value = min(gap, per_position_cap)
+                    else:  # kelly
+                        # Fractional-Kelly sizing from *realized* trades in
+                        # this backtest so far. f* = p - (1-p)/b where p is
+                        # win rate and b is win/loss ratio. Multiply by the
+                        # user-set kelly_fraction (typically 0.25 = quarter-
+                        # Kelly to avoid blow-ups from parameter error).
+                        closed = [tr for tr in open_positions if False]  # placeholder; use trades built
+                        # Use prior trades from `trades` list (already has return_pct filled)
+                        prior_wins = [tr.return_pct for tr in trades if tr.return_pct > 0]
+                        prior_losses = [abs(tr.return_pct) for tr in trades if tr.return_pct <= 0 and tr.return_pct is not None]
+                        if len(prior_wins) + len(prior_losses) >= 30:
+                            p = len(prior_wins) / max(1, len(prior_wins) + len(prior_losses))
+                            avg_win = sum(prior_wins) / max(1, len(prior_wins)) if prior_wins else 0.0
+                            avg_loss = sum(prior_losses) / max(1, len(prior_losses)) if prior_losses else 0.01
+                            b = (avg_win / avg_loss) if avg_loss > 0 else 1.0
+                            f_star = p - (1 - p) / b if b > 0 else 0.0
+                            f = max(0.0, f_star) * float(self.kelly_fraction or 0.25)
+                            # Cap at position_pct × 5 so Kelly can't go crazy
+                            f = min(f, self.position_pct * 5)
+                            new_position_value = max(0.0, current_equity * f)
+                        else:
+                            # Not enough priors — fall back to base position_pct
+                            new_position_value = max(0.0, current_equity * self.position_pct)
 
                     # Correlation-aware shrinkage: if the new ticker is highly
                     # correlated with already-open positions, we're not adding
@@ -726,6 +751,14 @@ class Backtest:
                 rows.append((d, starting_cash * (p / base_price)))
             bench_df = pd.DataFrame(rows, columns=["date", "equity"])
 
+        # Drop phantom trades — signals that got resized below $100 by the
+        # cash-clip and were never added to open_positions. Their
+        # position_value is effectively zero but their original return_pct
+        # (computed against the default position_size during initial trade
+        # construction) is still populated, which would inflate win rate and
+        # average-return metrics. Filter them here before summarising.
+        trades = [t for t in trades if (t.position_value or 0) >= 100.0]
+
         # Metrics
         from backtester.metrics import summarise  # local import avoids circular
         summary = summarise(trades, eq, bench_df, starting_cash)
@@ -743,6 +776,29 @@ class Backtest:
             "excluded_tickers": sorted(no_price_tickers)[:50],  # cap at 50 for response size
             "pct_of_total": (skipped["no_prices"] / max(1, len(self.signals))),
         }
+
+        # Signal half-life: raw signal-level forward-return decay curve,
+        # independent of strategy sizing / stops. Shows when the alpha
+        # actually lives vs when it's just holding beta.
+        try:
+            from backtester.halflife import compute_halflife as _compute_halflife
+            hl = _compute_halflife(self.signals, prices, max_days=60)
+            if hl:
+                summary["halflife"] = hl
+        except Exception as _e:
+            import logging as _lg
+            _lg.getLogger("seclab").warning(f"halflife skipped: {_e}")
+
+        # Information Coefficient — does signal.strength actually rank
+        # forward returns? Spearman rank correlation per horizon.
+        try:
+            from backtester.ic import compute_ic as _compute_ic
+            ic = _compute_ic(self.signals, prices)
+            if ic:
+                summary["information_coefficient"] = ic
+        except Exception as _e:
+            import logging as _lg
+            _lg.getLogger("seclab").warning(f"IC skipped: {_e}")
 
         # Turnover + Transaction Cost Attribution (TCA)
         # Slippage cost per trade ≈ 2 × position_value × slip (entry + exit)

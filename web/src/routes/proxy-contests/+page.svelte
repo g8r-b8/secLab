@@ -98,7 +98,7 @@
 
 <svelte:window onkeydown={(e) => selectedTicker && e.key === 'Escape' && (selectedTicker = null)} />
 
-<h1>🗳 Proxy Contests (DEF 14A variants)</h1>
+<h1>Proxy Contests (DEF 14A variants)</h1>
 <p class="subtitle">
 	Activist-filer definitive additional material (<code>DFAN14A</code>), contestant slates
 	(<code>DEFC14A</code>), and preliminary/revised non-company proxies. Each one flags a real or
@@ -264,7 +264,7 @@
 	<div class="modal" role="dialog" aria-modal="true" aria-label="{selectedTicker} proxy contest">
 		<header class="modal-header">
 			<h2>{selectedTicker} <span class="modal-sub">— proxy window · {start} → {end}</span></h2>
-			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">✕</button>
+			<button class="close" onclick={() => (selectedTicker = null)} aria-label="Close">×</button>
 		</header>
 		<div class="modal-body">
 			<PriceImpactChart ticker={selectedTicker} {start} {end} padDays={60} />

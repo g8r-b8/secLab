@@ -171,7 +171,7 @@
 	}
 </script>
 
-<h1>🔎 Parameter sweep</h1>
+<h1>Parameter sweep</h1>
 <p class="subtitle">
 	Run a preset across every combo of <code>hold_days × stop_loss × profit_target</code> to find
 	the configuration that actually beats SPY. Prices are fetched once and shared across all
@@ -277,7 +277,7 @@
 
 	<section class="top-grid">
 		<section class="panel">
-			<h2>🏆 Top 10 by Sharpe</h2>
+			<h2>Top 10 by Sharpe</h2>
 			<ol class="top-list">
 				{#each data.top_by_sharpe as c, i}
 					<li>
@@ -293,7 +293,7 @@
 			</ol>
 		</section>
 		<section class="panel">
-			<h2>🎯 Top 10 by alpha vs {benchmark}</h2>
+			<h2>Top 10 by alpha vs {benchmark}</h2>
 			<ol class="top-list">
 				{#each data.top_by_alpha as c, i}
 					<li>
